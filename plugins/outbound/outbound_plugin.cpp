@@ -282,6 +282,57 @@ static Fn_EOS_Auth_Login    g_pfnOrigEosAuthLogin    = nullptr;
 static uint64_t             g_FakePuidCounter        = 0x1000;
 static uint64_t             g_FakeEaidCounter        = 0x2000;
 
+// ---- EOS_Ecom_QueryOwnershipToken --------------------------
+// This is the call that Outbound uses to verify Steam-ticket
+// ownership against the EOS app's configured AppId. Confirmed
+// via il2cpp dump:
+//   EpicManager.GetOwnershipVerificationToken()
+//     -> QueryOwnershipTokenCallbackInfo (Result @ 0x0)
+// Epic's backend rejects because the Steam ticket is for
+// AppId 480 not the real one. Short-circuit at the native EOS
+// layer: fire the completion delegate immediately with
+// EOS_Success and a non-empty OwnershipToken.
+
+typedef struct EOS_Ecom_QueryOwnershipTokenCallbackInfo
+{
+    EOS_EResult       ResultCode;       // 0x00
+    void*             ClientData;       // 0x08
+    EOS_EpicAccountId LocalUserId;      // 0x10
+    const char*       OwnershipToken;   // 0x18 (Utf8String / char*)
+} EOS_Ecom_QueryOwnershipTokenCallbackInfo;
+
+typedef void (__cdecl *EOS_Ecom_OnQueryOwnershipTokenCallback)(
+    const EOS_Ecom_QueryOwnershipTokenCallbackInfo* Data);
+
+typedef void (__cdecl *Fn_EOS_Ecom_QueryOwnershipToken)(
+    void* /*EOS_HEcom*/ Handle,
+    const void*         Options,
+    void*               ClientData,
+    EOS_Ecom_OnQueryOwnershipTokenCallback CompletionDelegate);
+
+static Fn_EOS_Ecom_QueryOwnershipToken g_pfnOrigEosEcomQueryOwnership = nullptr;
+
+// A throwaway non-empty ownership token. The C# side just needs
+// a non-null Utf8String to treat the result as "have ownership"
+// rather than empty.
+static const char* kFakeOwnershipToken = "ucoco-synthetic-ownership-token";
+
+static void __cdecl Hooked_EOS_Ecom_QueryOwnershipToken(
+    void* Handle, const void* Options, void* ClientData,
+    EOS_Ecom_OnQueryOwnershipTokenCallback CompletionDelegate)
+{
+    LOG("[Outbound] EOS_Ecom_QueryOwnershipToken intercept");
+    if (!CompletionDelegate) return;
+
+    EOS_Ecom_QueryOwnershipTokenCallbackInfo info = {};
+    info.ResultCode     = EOS_EResult_Success;
+    info.ClientData     = ClientData;
+    info.LocalUserId    = (EOS_EpicAccountId)(uintptr_t)(++g_FakeEaidCounter);
+    info.OwnershipToken = kFakeOwnershipToken;
+    CompletionDelegate(&info);
+    LOG("[Outbound] EOS_Ecom_QueryOwnershipToken: fired Success with fake token");
+}
+
 static void __cdecl Hooked_EOS_Connect_Login(
     EOS_HConnect Handle, const EOS_Connect_LoginOptions* Options,
     void* ClientData, EOS_Connect_OnLoginCallback CompletionDelegate)
@@ -331,6 +382,9 @@ static bool TryInstallEosHooks()
     any |= InstallEosHook(hEos, "EOS_Auth_Login",
                           (void*)&Hooked_EOS_Auth_Login,
                           (void**)&g_pfnOrigEosAuthLogin);
+    any |= InstallEosHook(hEos, "EOS_Ecom_QueryOwnershipToken",
+                          (void*)&Hooked_EOS_Ecom_QueryOwnershipToken,
+                          (void**)&g_pfnOrigEosEcomQueryOwnership);
     installed = any;
     return any;
 }
