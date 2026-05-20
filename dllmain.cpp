@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define STEAM_API_EXPORTS
 
@@ -905,17 +906,14 @@ static DWORD WINAPI SteamStub_HookGetTickCount(void)
 // ============================================================
 // GetAuthSessionTicket Hook
 //
-// Fixes "ticket for other app" errors with matchmaking servers
-// when using a spoofed AppId (Spacewar/480) for the Steam
-// connection.
-//
-// We let Steam generate the real ticket against the FakeAppId
-// (g_ForcedAppId), then scan the ticket buffer for that AppId
-// as a uint32 LE and overwrite each occurrence with the real
-// AppId (g_OriginalAppId, set via `ogAppId` in the ini). This
-// lets the game server's BeginAuthSession accept the ticket
-// because the embedded AppId now matches what the matchmaking
-// layer expects.
+// Builds a fully synthetic Steam auth ticket with RealAppId
+// (g_OriginalAppId, from `ogAppId` ini) embedded in the
+// AppOwnershipTicket. We still call the original first so Steam
+// fires the GetAuthSessionTicketResponse_t callback the game
+// is waiting on; then we overwrite the buffer with the
+// synthetic ticket. Signature is left zeroed -- the matching
+// peer / lobby layer is expected NOT to round-trip to Steam's
+// Web API for validation (which would notice the bad signature).
 // ============================================================
 
 typedef HAuthTicket (S_CALLTYPE *Fn_GetAuthSessionTicket)(
@@ -923,56 +921,135 @@ typedef HAuthTicket (S_CALLTYPE *Fn_GetAuthSessionTicket)(
     uint32* pcbTicket, const SteamNetworkingIdentity* pIdentity);
 
 static Fn_GetAuthSessionTicket g_pfnOriginalGetAuthSessionTicket = nullptr;
+static uint32 g_TicketSerial = 0;
+
+static inline void TicketWriteU16(unsigned char*& p, uint16 v)
+{
+    p[0] = (unsigned char)(v & 0xFF);
+    p[1] = (unsigned char)((v >> 8) & 0xFF);
+    p += 2;
+}
+
+static inline void TicketWriteU32(unsigned char*& p, uint32 v)
+{
+    p[0] = (unsigned char)(v & 0xFF);
+    p[1] = (unsigned char)((v >> 8) & 0xFF);
+    p[2] = (unsigned char)((v >> 16) & 0xFF);
+    p[3] = (unsigned char)((v >> 24) & 0xFF);
+    p += 4;
+}
+
+static inline void TicketWriteU64(unsigned char*& p, uint64 v)
+{
+    TicketWriteU32(p, (uint32)(v & 0xFFFFFFFFu));
+    TicketWriteU32(p, (uint32)(v >> 32));
+}
+
+// Synthesizes a Steam auth-session ticket whose AppOwnershipTicket
+// reports g_OriginalAppId. Returns total bytes written, or 0 on
+// failure (buffer too small).
+static uint32 BuildSyntheticAuthTicket(
+    void* pTicket, int cbMaxTicket, uint64 steamID, uint32 appId)
+{
+    // Layout (little-endian):
+    //   GCToken section:       4 (len=0x14) + 0x14 = 24 bytes
+    //   SessionHeader section: 4 (len=0x18) + 0x18 = 28 bytes
+    //   AppOwnershipTicket:    4 (len) + body (52) + sig (128) = 184 bytes
+    // Total: 236 bytes (no licenses, no DLCs).
+    const uint32 kGCTokenLen      = 20;
+    const uint32 kSessionHdrLen   = 24;
+    const uint32 kAppTicketBody   = 52;
+    const uint32 kAppTicketSig    = 128;
+    const uint32 kAppTicketLen    = kAppTicketBody + kAppTicketSig;
+    const uint32 kTotal = 4 + kGCTokenLen
+                        + 4 + kSessionHdrLen
+                        + 4 + kAppTicketLen;
+
+    if (!pTicket || cbMaxTicket < (int)kTotal)
+        return 0;
+
+    unsigned char* p = (unsigned char*)pTicket;
+    memset(p, 0, kTotal);
+
+    uint32 nowUnix = (uint32)time(nullptr);
+    uint32 nowMs   = GetTickCount();
+
+    // ---- GCToken section ----
+    TicketWriteU32(p, kGCTokenLen);
+    // GCToken content: uint64 token id (use steamID-derived), uint64 SteamID,
+    // uint32 generated_ms. Real layout: 8 + 8 + 4 = 20 bytes.
+    TicketWriteU64(p, steamID ^ 0xA5A5A5A5A5A5A5A5ull);
+    TicketWriteU64(p, steamID);
+    TicketWriteU32(p, nowMs);
+
+    // ---- SessionHeader section ----
+    TicketWriteU32(p, kSessionHdrLen);
+    // 24 bytes: unknown(1), unknown(2), ExternalIP, InternalIP,
+    // TimeSinceStarted_ms, ConnectCount.
+    TicketWriteU32(p, 1);
+    TicketWriteU32(p, 2);
+    TicketWriteU32(p, 0); // ExternalIP -- unknown, leave 0
+    TicketWriteU32(p, 0); // InternalIP -- unknown, leave 0
+    TicketWriteU32(p, nowMs);
+    TicketWriteU32(p, ++g_TicketSerial);
+
+    // ---- AppOwnershipTicket ----
+    TicketWriteU32(p, kAppTicketLen);
+    unsigned char* pBodyStart = p;
+    TicketWriteU32(p, 4);                 // version
+    TicketWriteU64(p, steamID);           // SteamID
+    TicketWriteU32(p, appId);             // AppID  <-- the whole point
+    TicketWriteU32(p, 0);                 // OwnershipTicketExternalIP
+    TicketWriteU32(p, 0);                 // OwnershipTicketInternalIP
+    TicketWriteU32(p, 0x4);               // OwnershipFlags
+    TicketWriteU32(p, nowUnix);           // OwnershipTicketGenerated
+    TicketWriteU32(p, nowUnix + 24*3600); // OwnershipTicketExpires
+    TicketWriteU16(p, 0);                 // LicenseCount
+    TicketWriteU16(p, 0);                 // DLCCount
+    TicketWriteU16(p, 0);                 // Reserved
+    // Pad body to kAppTicketBody (in case we miscounted)
+    uint32 written = (uint32)(p - pBodyStart);
+    if (written < kAppTicketBody) p += (kAppTicketBody - written);
+
+    // 128-byte signature: leave as zeros (already memset).
+    p += kAppTicketSig;
+
+    return (uint32)(p - (unsigned char*)pTicket);
+}
 
 static HAuthTicket S_CALLTYPE Hooked_GetAuthSessionTicket(
     void* pThis, void* pTicket, int cbMaxTicket,
     uint32* pcbTicket, const SteamNetworkingIdentity* pIdentity)
 {
+    // Call the original so Steam queues the GetAuthSessionTicketResponse_t
+    // callback the game is waiting on (and so we get a valid HAuthTicket
+    // handle to return).
     HAuthTicket h = g_pfnOriginalGetAuthSessionTicket(
         pThis, pTicket, cbMaxTicket, pcbTicket, pIdentity);
 
     if (g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
+        return h;
+
+    if (!pTicket || !pcbTicket || cbMaxTicket <= 0)
     {
+        UCOLOG("[UCOnline2] GetAuthSessionTicket: no buffer to fill");
         return h;
     }
 
-    if (!pTicket || !pcbTicket || *pcbTicket == 0)
+    uint64 steamID = 0;
+    if (g_ClientCtx.SteamUser())
+        steamID = g_ClientCtx.SteamUser()->GetSteamID().ConvertToUint64();
+
+    uint32 written = BuildSyntheticAuthTicket(pTicket, cbMaxTicket, steamID, g_OriginalAppId);
+    if (written == 0)
     {
-        UCOLOG("[UCOnline2] GetAuthSessionTicket: nothing to rewrite");
+        UCOLOG("[UCOnline2] GetAuthSessionTicket: buffer too small for synthetic ticket (have %d)", cbMaxTicket);
         return h;
     }
 
-    uint32 cb = *pcbTicket;
-    if (cb > (uint32)cbMaxTicket) cb = (uint32)cbMaxTicket;
-
-    uint32 scanLen = (cb < 128) ? cb : 128;
-    if (scanLen < 4) return h;
-
-    unsigned char* p = (unsigned char*)pTicket;
-    uint32 needle = g_ForcedAppId;
-    uint32 replace = g_OriginalAppId;
-    int rewrites = 0;
-
-    for (uint32 i = 0; i + 4 <= scanLen; i++)
-    {
-        uint32 val = (uint32)p[i]
-                   | ((uint32)p[i+1] << 8)
-                   | ((uint32)p[i+2] << 16)
-                   | ((uint32)p[i+3] << 24);
-        if (val == needle)
-        {
-            p[i]   = (unsigned char)(replace & 0xFF);
-            p[i+1] = (unsigned char)((replace >> 8) & 0xFF);
-            p[i+2] = (unsigned char)((replace >> 16) & 0xFF);
-            p[i+3] = (unsigned char)((replace >> 24) & 0xFF);
-            rewrites++;
-            i += 3;
-        }
-    }
-
-    UCOLOG("[UCOnline2] GetAuthSessionTicket: rewrote %d AppId field(s) from %u to %u (ticket size %u)",
-        rewrites, g_ForcedAppId, g_OriginalAppId, cb);
-
+    *pcbTicket = written;
+    UCOLOG("[UCOnline2] GetAuthSessionTicket: synthesized ticket (%u bytes) AppId=%u SteamID=%llu handle=%u",
+        written, g_OriginalAppId, steamID, h);
     return h;
 }
 
