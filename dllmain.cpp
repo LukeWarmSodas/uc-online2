@@ -31,6 +31,7 @@ S_API ISteamClient* g_pSteamClientGameServer = nullptr;
 #include "include/api/api_shutdown.h"
 #include "include/api/api_factory.h"
 #include "include/api/api_flat.h"
+#include "include/eos_hooks.h"
 
 // ============================================================
 // Global variable definitions
@@ -350,6 +351,20 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 		{
 			SteamStub_Init();
 		}
+
+		// EOSSDK usually loads after our DLL during Unity plugin init.
+		// Spin a brief watcher thread that installs the hooks the moment
+		// EOSSDK-Win64-Shipping.dll appears in the process.
+		CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+			for (int i = 0; i < 300; ++i) // ~60s window
+			{
+				if (InstallEosHooks())
+					return 0;
+				Sleep(200);
+			}
+			UCOLOG("[UCOnline2] EOSSDK never loaded -- giving up on EOS hooks");
+			return 0;
+		}, nullptr, 0, nullptr);
 	}
 	else if (dwReason == DLL_PROCESS_DETACH)
 	{
