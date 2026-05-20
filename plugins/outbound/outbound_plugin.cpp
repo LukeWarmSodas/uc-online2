@@ -459,12 +459,50 @@ static bool TryInstallEosHooks()
 // state may still be wedged on the Photon side; if that
 // surfaces a new error we'll add a follow-up.
 typedef void (__fastcall *Fn_OnCustomAuthenticationFailed)(void* pThis, void* debugMessage);
-static Fn_OnCustomAuthenticationFailed g_pfnOrigOnCustomAuthenticationFailed = nullptr;
+typedef void (__fastcall *Fn_OnCustomAuthenticationResponse)(void* pThis, void* runner, void* data);
+
+static Fn_OnCustomAuthenticationFailed   g_pfnOrigOnCustomAuthenticationFailed                = nullptr;
+static Fn_OnCustomAuthenticationResponse g_pfnOrigNetworkDelegatesOnCustomAuthResponse        = nullptr;
+static Fn_OnCustomAuthenticationResponse g_pfnOrigNetworkEventsOnCustomAuthResponse           = nullptr;
 
 static void __fastcall Hooked_OnCustomAuthenticationFailed(void* pThis, void* debugMessage)
 {
     LOG("[Outbound] Fusion.CloudServices.OnCustomAuthenticationFailed suppressed");
-    // Intentionally do not call original: do not display the error UI.
+}
+
+// Fan-out wrappers in Fusion.Runtime that distribute the auth
+// response (success OR failure dictionary) to game-attached
+// delegates / UnityEvents. Suppressing them prevents the game
+// from ever seeing the failure dictionary and therefore from
+// running its error-display code.
+static void __fastcall Hooked_NetworkDelegatesOnCustomAuthResponse(void* pThis, void* runner, void* data)
+{
+    LOG("[Outbound] Fusion.NetworkDelegates.OnCustomAuthenticationResponse suppressed");
+}
+
+static void __fastcall Hooked_NetworkEventsOnCustomAuthResponse(void* pThis, void* runner, void* data)
+{
+    LOG("[Outbound] Fusion.NetworkEvents.OnCustomAuthenticationResponse suppressed");
+}
+
+static bool InstallIl2CppHook(const char* image, const char* ns, const char* klass,
+                              const char* method, int argc, void* hook, void** orig,
+                              const char* logName)
+{
+    void* fn = IL2CPP_FindMethodPtr(image, ns, klass, method, argc);
+    if (!fn)
+    {
+        LOG("[Outbound] IL2CPP: could not find %s", logName);
+        return false;
+    }
+    if (MH_CreateHook(fn, hook, orig) != MH_OK ||
+        MH_EnableHook(fn) != MH_OK)
+    {
+        LOG("[Outbound] hook FAILED for %s", logName);
+        return false;
+    }
+    LOG("[Outbound] %s hook installed at %p", logName, fn);
+    return true;
 }
 
 static void TryInstallIl2CppHooks()
@@ -474,28 +512,30 @@ static void TryInstallIl2CppHooks()
     if (attempted) return;
     attempted = true;
 
-    void* fn = IL2CPP_FindMethodPtr(
+    // Photon Realtime internal failure callback (the one we got firing already).
+    InstallIl2CppHook(
         "Fusion.Runtime", "Fusion", "CloudServices",
-        "OnCustomAuthenticationFailed", 1);
-    if (!fn)
-    {
-        LOG("[Outbound] IL2CPP: could not find Fusion.CloudServices.OnCustomAuthenticationFailed");
-        return;
-    }
+        "OnCustomAuthenticationFailed", 1,
+        (void*)&Hooked_OnCustomAuthenticationFailed,
+        (void**)&g_pfnOrigOnCustomAuthenticationFailed,
+        "Fusion.CloudServices.OnCustomAuthenticationFailed");
 
-    MH_STATUS s = MH_CreateHook(fn, &Hooked_OnCustomAuthenticationFailed,
-                                (void**)&g_pfnOrigOnCustomAuthenticationFailed);
-    if (s != MH_OK)
-    {
-        LOG("[Outbound] MH_CreateHook failed for OnCustomAuthenticationFailed: %d", s);
-        return;
-    }
-    if (MH_EnableHook(fn) != MH_OK)
-    {
-        LOG("[Outbound] MH_EnableHook failed for OnCustomAuthenticationFailed");
-        return;
-    }
-    LOG("[Outbound] Fusion.CloudServices.OnCustomAuthenticationFailed hook installed at %p", fn);
+    // Fusion fan-outs to game-attached delegates / UnityEvents.
+    // Suppressing both prevents the game from observing the
+    // failure dictionary that triggers its error UI.
+    InstallIl2CppHook(
+        "Fusion.Runtime", "Fusion", "NetworkDelegates",
+        "OnCustomAuthenticationResponse", 2,
+        (void*)&Hooked_NetworkDelegatesOnCustomAuthResponse,
+        (void**)&g_pfnOrigNetworkDelegatesOnCustomAuthResponse,
+        "Fusion.NetworkDelegates.OnCustomAuthenticationResponse");
+
+    InstallIl2CppHook(
+        "Fusion.Runtime", "Fusion", "NetworkEvents",
+        "OnCustomAuthenticationResponse", 2,
+        (void*)&Hooked_NetworkEventsOnCustomAuthResponse,
+        (void**)&g_pfnOrigNetworkEventsOnCustomAuthResponse,
+        "Fusion.NetworkEvents.OnCustomAuthenticationResponse");
 }
 
 static DWORD WINAPI WatcherProc(LPVOID)
