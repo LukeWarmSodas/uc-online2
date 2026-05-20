@@ -442,9 +442,31 @@ static bool TryInstallEosHooks()
     return any;
 }
 
-// Stub for the actual game-method hooks. Filled in once we
-// identify the target method via Il2CppDumper. See README in
-// plugins/outbound/.
+// ---- Fusion.CloudServices.OnCustomAuthenticationFailed ----
+//
+// Photon Fusion's CloudServices is the IConnectionCallbacks
+// implementation for the Photon master server. When Photon's
+// custom auth callback URL (Outbound's backend) rejects our
+// Steam ticket -- because the ticket is signed for AppId 480
+// instead of the real AppId 2681030 -- the master returns
+// CustomAuthenticationResult.Failed and Photon invokes
+//   CloudServices.OnCustomAuthenticationFailed(string debugMessage)
+// (Image 13: Fusion.Runtime.dll, RVA 0xF20B40 in the dump).
+// That method displays the "Failed(2): 'Ticket for other app'"
+// error to the user.
+//
+// Suppressing the call hides the UI error. The connection
+// state may still be wedged on the Photon side; if that
+// surfaces a new error we'll add a follow-up.
+typedef void (__fastcall *Fn_OnCustomAuthenticationFailed)(void* pThis, void* debugMessage);
+static Fn_OnCustomAuthenticationFailed g_pfnOrigOnCustomAuthenticationFailed = nullptr;
+
+static void __fastcall Hooked_OnCustomAuthenticationFailed(void* pThis, void* debugMessage)
+{
+    LOG("[Outbound] Fusion.CloudServices.OnCustomAuthenticationFailed suppressed");
+    // Intentionally do not call original: do not display the error UI.
+}
+
 static void TryInstallIl2CppHooks()
 {
     if (!IL2CPP_IsReady()) return;
@@ -452,14 +474,28 @@ static void TryInstallIl2CppHooks()
     if (attempted) return;
     attempted = true;
 
-    LOG("[Outbound] IL2CPP ready -- placeholder for game-method hooks");
-    // TODO: once Il2CppDumper reveals the target method, add:
-    //   void* fn = IL2CPP_FindMethodPtr("Assembly-CSharp", "Namespace",
-    //                                    "Class", "Method", argCount);
-    //   if (fn) {
-    //       MH_CreateHook(fn, &Hooked_TargetMethod, &g_pfnOrigTargetMethod);
-    //       MH_EnableHook(fn);
-    //   }
+    void* fn = IL2CPP_FindMethodPtr(
+        "Fusion.Runtime", "Fusion", "CloudServices",
+        "OnCustomAuthenticationFailed", 1);
+    if (!fn)
+    {
+        LOG("[Outbound] IL2CPP: could not find Fusion.CloudServices.OnCustomAuthenticationFailed");
+        return;
+    }
+
+    MH_STATUS s = MH_CreateHook(fn, &Hooked_OnCustomAuthenticationFailed,
+                                (void**)&g_pfnOrigOnCustomAuthenticationFailed);
+    if (s != MH_OK)
+    {
+        LOG("[Outbound] MH_CreateHook failed for OnCustomAuthenticationFailed: %d", s);
+        return;
+    }
+    if (MH_EnableHook(fn) != MH_OK)
+    {
+        LOG("[Outbound] MH_EnableHook failed for OnCustomAuthenticationFailed");
+        return;
+    }
+    LOG("[Outbound] Fusion.CloudServices.OnCustomAuthenticationFailed hook installed at %p", fn);
 }
 
 static DWORD WINAPI WatcherProc(LPVOID)
