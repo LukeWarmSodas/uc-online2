@@ -473,6 +473,11 @@ static Fn_NetworkManagerOnShutdown g_pfnOrigNetworkManagerOnShutdown = nullptr;
 typedef void* (__fastcall *Fn_PhotonAppSettings_get_Global)();
 static Fn_PhotonAppSettings_get_Global g_pfnOrigPhotonAppSettingsGetGlobal = nullptr;
 
+// AuthenticationValues.set_AuthType(CustomAuthenticationType value)
+// CustomAuthenticationType is byte-backed. None = 255.
+typedef void (__fastcall *Fn_AuthValues_set_AuthType)(void* pThis, unsigned int value);
+static Fn_AuthValues_set_AuthType g_pfnOrigAuthValuesSetAuthType = nullptr;
+
 // Our replacement GUID for Fusion AppId, read from the ini.
 // Stored as the managed System.String pointer (created lazily on
 // first hook fire after IL2CPP runtime is ready).
@@ -530,6 +535,23 @@ static void __fastcall Hooked_NetworkManagerOnShutdown(void* pThis, void* runner
 // even though IL2CPP_TryInit has succeeded by the time hooks
 // fire, doing the allocation inside the hook keeps us on the
 // thread that owns the domain attach).
+// The game (via PlatformManager.GetAuthenticationSettings)
+// builds AuthenticationValues with AuthType=Steam and the
+// Steam ticket as Token. Photon routes by AuthType: with
+// Steam, Photon calls Steam Web API using your dashboard's
+// configured apiKeySecret -- which is bogus in our setup,
+// so Steam returns 403 Forbidden and Photon forwards it.
+//
+// Force AuthType to None (255). Photon then treats the
+// client as anonymous, skips provider validation entirely,
+// and accepts the connection on apps that allow anonymous.
+static void __fastcall Hooked_AuthValues_set_AuthType(void* pThis, unsigned int value)
+{
+    if (value != 255)
+        LOG("[Outbound] AuthenticationValues.set_AuthType(%u) -> forced 255 (None)", value);
+    g_pfnOrigAuthValuesSetAuthType(pThis, 255);
+}
+
 static void* __fastcall Hooked_PhotonAppSettings_get_Global()
 {
     void* settings = g_pfnOrigPhotonAppSettingsGetGlobal();
@@ -677,6 +699,19 @@ static void TryInstallIl2CppHooks()
             (void*)&Hooked_PhotonAppSettings_get_Global,
             (void**)&g_pfnOrigPhotonAppSettingsGetGlobal,
             "PhotonAppSettings.get_Global");
+
+        // When redirecting to a user-controlled Photon app, the
+        // user almost certainly doesn't have Outbound's Steam
+        // Publisher API key (it's a developer secret). Forcing
+        // AuthType=None makes Photon skip Steam Web API
+        // validation entirely so anonymous-allowed apps accept
+        // the connection.
+        InstallIl2CppHook(
+            "Fusion.Realtime", "Fusion.Photon.Realtime", "AuthenticationValues",
+            "set_AuthType", 1,
+            (void*)&Hooked_AuthValues_set_AuthType,
+            (void**)&g_pfnOrigAuthValuesSetAuthType,
+            "AuthenticationValues.set_AuthType");
     }
 }
 
