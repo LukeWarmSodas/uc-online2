@@ -15,8 +15,11 @@
 
 S_API ISteamClient* g_pSteamClientGameServer = nullptr;
 
+#include <vector>
+
 #include "include/registfuncs.h"
 #include "include/callback_dispatcher.h"
+#include "include/uco_plugin.h"
 #include "include/globals.h"
 #include "include/uc_loader.h"
 #include "include/dump_handler.h"
@@ -31,7 +34,6 @@ S_API ISteamClient* g_pSteamClientGameServer = nullptr;
 #include "include/api/api_shutdown.h"
 #include "include/api/api_factory.h"
 #include "include/api/api_flat.h"
-#include "include/eos_hooks.h"
 
 // ============================================================
 // Global variable definitions
@@ -294,13 +296,17 @@ static void LoadGameOverlay()
 // DllMain
 // ============================================================
 
+// File-scope so the SteamAPI_Init path in api_client.h can call
+// InitPlugins() on it, and DLL_PROCESS_DETACH can call
+// ShutdownPlugins().
+CDLLLoader s_PluginLoader;
+
 BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 {
 	if (dwReason == DLL_PROCESS_ATTACH)
 	{
 		UCOLOG("[UCOnline2] DllMain -> DLL_PROCESS_ATTACH");
 
-		static CDLLLoader s_PluginLoader;
 		s_PluginLoader.ReadConfig();
 		g_ForcedAppId = s_PluginLoader.GetAppId();
 		g_OriginalAppId = s_PluginLoader.GetOgAppId();
@@ -351,24 +357,11 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 		{
 			SteamStub_Init();
 		}
-
-		// EOSSDK usually loads after our DLL during Unity plugin init.
-		// Spin a brief watcher thread that installs the hooks the moment
-		// EOSSDK-Win64-Shipping.dll appears in the process.
-		CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
-			for (int i = 0; i < 300; ++i) // ~60s window
-			{
-				if (InstallEosHooks())
-					return 0;
-				Sleep(200);
-			}
-			UCOLOG("[UCOnline2] EOSSDK never loaded -- giving up on EOS hooks");
-			return 0;
-		}, nullptr, 0, nullptr);
 	}
 	else if (dwReason == DLL_PROCESS_DETACH)
 	{
 		UCOLOG("[UCOnline2] DllMain -> DLL_PROCESS_DETACH");
+		s_PluginLoader.ShutdownPlugins();
 		if (g_bSteamStubEnabled)
 		{
 			MH_DisableHook(reinterpret_cast<LPVOID*>(GetTickCount));
@@ -386,44 +379,46 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 static bool s_bDispatcherReady = false;
 
 // ============================================================
-// Auth-callback patcher
+// Callback patcher registry
 //
-// Steam fires GetAuthSessionTicketResponse_t (k_iCallback=163)
-// after GetAuthSessionTicket. Because we synthesize a ticket
-// whose signature doesn't match Steam's expected key for
-// AppId=480, Steam reports m_eResult=k_EResultFail (=2) -- the
-// game shows that as "Failed(2): Ticket for other app".
-// Likewise ValidateAuthTicketResponse_t (k_iCallback=143) can
-// come back non-OK on incoming tickets for the same reason.
-// Force both to OK before the game's registered CCallback sees
-// them.
+// Plugins (see include/uco_plugin.h) can register a callback
+// patcher for a specific iCallback. Patchers run -- in
+// registration order -- on every matching callback before it
+// is dispatched to the game's CCallback.
+//
+// The registry replaces the previous hard-coded auth callback
+// patching. Per-game auth behavior now lives in a plugin.
 // ============================================================
-static void PatchAuthCallback(int iCallback, uint8* pBuf, uint32 cbBuf)
+struct CallbackPatcherEntry
+{
+    int                    iCallback;
+    UCO_CallbackPatcherFn  fn;
+};
+static std::vector<CallbackPatcherEntry> g_CallbackPatchers;
+static SRWLOCK g_CallbackPatcherLock = SRWLOCK_INIT;
+
+void UCO_RegisterCallbackPatcher(int iCallback, UCO_CallbackPatcherFn fn)
+{
+    if (!fn) return;
+    AcquireSRWLockExclusive(&g_CallbackPatcherLock);
+    g_CallbackPatchers.push_back({ iCallback, fn });
+    ReleaseSRWLockExclusive(&g_CallbackPatcherLock);
+    UCOLOG("[UCOnline2] Callback patcher registered for iCallback=%d", iCallback);
+}
+
+static void RunCallbackPatchers(int iCallback, uint8* pBuf, uint32 cbBuf)
 {
     if (!pBuf || cbBuf == 0) return;
-
-    // GetAuthSessionTicketResponse_t = k_iSteamUserCallbacks(100) + 63
-    if (iCallback == 163 && cbBuf >= sizeof(GetAuthSessionTicketResponse_t))
+    AcquireSRWLockShared(&g_CallbackPatcherLock);
+    // Iterate by index in case a patcher misbehaves and re-enters.
+    size_t n = g_CallbackPatchers.size();
+    for (size_t i = 0; i < n; i++)
     {
-        GetAuthSessionTicketResponse_t* p = (GetAuthSessionTicketResponse_t*)pBuf;
-        if (p->m_eResult != k_EResultOK)
-        {
-            UCOLOG("[UCOnline2] Forcing GetAuthSessionTicketResponse %d->OK (handle=%u)",
-                (int)p->m_eResult, p->m_hAuthTicket);
-            p->m_eResult = k_EResultOK;
-        }
+        const auto& e = g_CallbackPatchers[i];
+        if (e.iCallback == iCallback)
+            e.fn(pBuf, cbBuf);
     }
-    // ValidateAuthTicketResponse_t = k_iSteamUserCallbacks(100) + 43
-    else if (iCallback == 143 && cbBuf >= sizeof(ValidateAuthTicketResponse_t))
-    {
-        ValidateAuthTicketResponse_t* p = (ValidateAuthTicketResponse_t*)pBuf;
-        if (p->m_eAuthSessionResponse != k_EAuthSessionResponseOK)
-        {
-            UCOLOG("[UCOnline2] Forcing ValidateAuthTicketResponse %d->OK (sid=%llu)",
-                (int)p->m_eAuthSessionResponse, p->m_SteamID.ConvertToUint64());
-            p->m_eAuthSessionResponse = k_EAuthSessionResponseOK;
-        }
-    }
+    ReleaseSRWLockShared(&g_CallbackPatcherLock);
 }
 
 CCallbackDispatcher::CCallbackDispatcher()
@@ -567,7 +562,7 @@ void CCallbackDispatcher::DispatchFrame(HSteamPipe hPipe, bool bServer)
 								bSkip = true;
 						}
 
-						PatchAuthCallback(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
+						RunCallbackPatchers(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
 
 						if (!bSkip)
 							pCb->Run(msg.m_pubParam);
@@ -634,7 +629,7 @@ void CCallbackDispatcher::DispatchFrameSafe(HSteamPipe hPipe, bool bServer)
 						else if (msg.m_hSteamUser == g_ClientUser && !(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && !bServer)
 						{
 							UCOLOG("[UCOnline2] Client callback (safe) -> %d flags=%d\r\n", msg.m_iCallback, pCb->m_nCallbackFlags);
-							PatchAuthCallback(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
+							RunCallbackPatchers(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
 							pCb->Run(msg.m_pubParam);
 							break;
 						}
@@ -963,40 +958,27 @@ static DWORD WINAPI SteamStub_HookGetTickCount(void)
 }
 
 // ============================================================
-// GetAuthSessionTicket Hook
+// Generic Steam-side spoof hooks
 //
-// Builds a fully synthetic Steam auth ticket with the ogAppId
-// (g_OriginalAppId, from the `ogAppId` ini key) embedded in
-// the AppOwnershipTicket. We still call the original first so Steam
-// fires the GetAuthSessionTicketResponse_t callback the game
-// is waiting on; then we overwrite the buffer with the
-// synthetic ticket. Signature is left zeroed -- the matching
-// peer / lobby layer is expected NOT to round-trip to Steam's
-// Web API for validation (which would notice the bad signature).
+// These are kept in core because they apply uniformly to any
+// ogAppId-spoofed setup -- they don't carry per-game logic.
+// Game-specific behaviors (auth ticket synthesis, EOS bypass,
+// etc.) live in plugins; see include/uco_plugin.h and the
+// reference Outbound plugin under plugins/outbound/.
 // ============================================================
-
-typedef HAuthTicket (S_CALLTYPE *Fn_GetAuthSessionTicket)(
-    void* pThis, void* pTicket, int cbMaxTicket,
-    uint32* pcbTicket, const SteamNetworkingIdentity* pIdentity);
-
-typedef EBeginAuthSessionResult (S_CALLTYPE *Fn_BeginAuthSession)(
-    void* pThis, const void* pAuthTicket, int cbAuthTicket, CSteamID steamID);
 
 typedef uint32 (S_CALLTYPE *Fn_GetAppID)(void* pThis);
 typedef bool   (S_CALLTYPE *Fn_BIsSubscribedApp)(void* pThis, AppId_t appID);
 
-static Fn_GetAuthSessionTicket g_pfnOriginalGetAuthSessionTicket = nullptr;
-static Fn_BeginAuthSession    g_pfnOriginalBeginAuthSession    = nullptr;
-static Fn_GetAppID            g_pfnOriginalGetAppID            = nullptr;
-static Fn_BIsSubscribedApp    g_pfnOriginalBIsSubscribedApp    = nullptr;
-static uint32 g_TicketSerial = 0;
-static bool   g_bGetAppIDLoggedFirst = false;
-static bool   g_bSubscribedLoggedFirst = false;
+static Fn_GetAppID         g_pfnOriginalGetAppID         = nullptr;
+static Fn_BIsSubscribedApp g_pfnOriginalBIsSubscribedApp = nullptr;
+static bool                g_bGetAppIDLoggedFirst        = false;
+static bool                g_bSubscribedLoggedFirst      = false;
 
 // Many games gate multiplayer behind "do you actually own this AppId?"
 // via ISteamApps::BIsSubscribedApp(GetAppID()). Real Steam answers
 // false because the user owns Spacewar (480), not the real AppId.
-// Return true for the ogAppId (matches OnlineFix's behavior).
+// Return true for the ogAppId.
 static bool S_CALLTYPE Hooked_BIsSubscribedApp(void* pThis, AppId_t appID)
 {
     bool original = g_pfnOriginalBIsSubscribedApp(pThis, appID);
@@ -1012,13 +994,9 @@ static bool S_CALLTYPE Hooked_BIsSubscribedApp(void* pThis, AppId_t appID)
     return original;
 }
 
-// Game compares the AppId field inside the auth ticket against
-// ISteamUtils::GetAppID() before passing the ticket onward. With
-// the spoofed init AppId, real Steam reports 480 from GetAppID
-// while our synthesized ticket carries ogAppId -- mismatch produces
-// "Failed(2): Ticket for other app". Return ogAppId so they match
-// (and so other game systems see the "real" AppId, matching
-// OnlineFix's RealAppId behavior).
+// Make ISteamUtils::GetAppID() report ogAppId so the rest of the
+// game stack agrees on the "real" AppId (matches the way OnlineFix
+// exposes RealAppId via the same interface).
 static uint32 S_CALLTYPE Hooked_GetAppID(void* pThis)
 {
     uint32 original = g_pfnOriginalGetAppID(pThis);
@@ -1034,212 +1012,23 @@ static uint32 S_CALLTYPE Hooked_GetAppID(void* pThis)
     return g_OriginalAppId;
 }
 
-// Always tell the game that BeginAuthSession succeeded -- Steam would
-// otherwise return k_EBeginAuthSessionResultGameMismatch because the
-// ticket's AppOwnership section names g_OriginalAppId while Steam's
-// internal active app is g_ForcedAppId (480).
-static EBeginAuthSessionResult S_CALLTYPE Hooked_BeginAuthSession(
-    void* pThis, const void* pAuthTicket, int cbAuthTicket, CSteamID steamID)
-{
-    if (g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
-        return g_pfnOriginalBeginAuthSession(pThis, pAuthTicket, cbAuthTicket, steamID);
-
-    UCOLOG("[UCOnline2] BeginAuthSession bypass: returning OK (cb=%d sid=%llu)",
-        cbAuthTicket, steamID.ConvertToUint64());
-    return k_EBeginAuthSessionResultOK;
-}
-
-static inline void TicketWriteU16(unsigned char*& p, uint16 v)
-{
-    p[0] = (unsigned char)(v & 0xFF);
-    p[1] = (unsigned char)((v >> 8) & 0xFF);
-    p += 2;
-}
-
-static inline void TicketWriteU32(unsigned char*& p, uint32 v)
-{
-    p[0] = (unsigned char)(v & 0xFF);
-    p[1] = (unsigned char)((v >> 8) & 0xFF);
-    p[2] = (unsigned char)((v >> 16) & 0xFF);
-    p[3] = (unsigned char)((v >> 24) & 0xFF);
-    p += 4;
-}
-
-static inline void TicketWriteU64(unsigned char*& p, uint64 v)
-{
-    TicketWriteU32(p, (uint32)(v & 0xFFFFFFFFu));
-    TicketWriteU32(p, (uint32)(v >> 32));
-}
-
-// Synthesizes a Steam auth-session ticket whose AppOwnershipTicket
-// reports g_OriginalAppId. Returns total bytes written, or 0 on
-// failure (buffer too small).
-static uint32 BuildSyntheticAuthTicket(
-    void* pTicket, int cbMaxTicket, uint64 steamID, uint32 appId)
-{
-    // Layout (little-endian):
-    //   GCToken section:       4 (len=0x14) + 0x14 = 24 bytes
-    //   SessionHeader section: 4 (len=0x18) + 0x18 = 28 bytes
-    //   AppOwnershipTicket:    4 (len) + body (52) + sig (128) = 184 bytes
-    // Total: 236 bytes (no licenses, no DLCs).
-    const uint32 kGCTokenLen      = 20;
-    const uint32 kSessionHdrLen   = 24;
-    // AppOwnershipTicket body: 4 (ver) + 8 (sid) + 4 (appid) + 4 (extIP)
-    //   + 4 (intIP) + 4 (flags) + 4 (gen) + 4 (exp) + 2 (lic#)
-    //   + 2 (dlc#) + 2 (reserved) = 42 bytes. Previous code padded to
-    //   52 which inserted 10 garbage bytes between Reserved and the
-    //   signature; parsers using LicenseCount/DLCCount to locate the
-    //   signature would land on junk.
-    const uint32 kAppTicketBody   = 42;
-    const uint32 kAppTicketSig    = 128;
-    const uint32 kAppTicketLen    = kAppTicketBody + kAppTicketSig;
-    const uint32 kTotal = 4 + kGCTokenLen
-                        + 4 + kSessionHdrLen
-                        + 4 + kAppTicketLen;
-
-    if (!pTicket || cbMaxTicket < (int)kTotal)
-        return 0;
-
-    unsigned char* p = (unsigned char*)pTicket;
-    memset(p, 0, kTotal);
-
-    uint32 nowUnix = (uint32)time(nullptr);
-    uint32 nowMs   = GetTickCount();
-
-    // ---- GCToken section ----
-    TicketWriteU32(p, kGCTokenLen);
-    // GCToken content: uint64 token id (use steamID-derived), uint64 SteamID,
-    // uint32 generated_ms. Real layout: 8 + 8 + 4 = 20 bytes.
-    TicketWriteU64(p, steamID ^ 0xA5A5A5A5A5A5A5A5ull);
-    TicketWriteU64(p, steamID);
-    TicketWriteU32(p, nowMs);
-
-    // ---- SessionHeader section ----
-    TicketWriteU32(p, kSessionHdrLen);
-    // 24 bytes: unknown(1), unknown(2), ExternalIP, InternalIP,
-    // TimeSinceStarted_ms, ConnectCount.
-    TicketWriteU32(p, 1);
-    TicketWriteU32(p, 2);
-    TicketWriteU32(p, 0); // ExternalIP -- unknown, leave 0
-    TicketWriteU32(p, 0); // InternalIP -- unknown, leave 0
-    TicketWriteU32(p, nowMs);
-    TicketWriteU32(p, ++g_TicketSerial);
-
-    // ---- AppOwnershipTicket ----
-    TicketWriteU32(p, kAppTicketLen);
-    unsigned char* pBodyStart = p;
-    TicketWriteU32(p, 4);                 // version
-    TicketWriteU64(p, steamID);           // SteamID
-    TicketWriteU32(p, appId);             // AppID  <-- the whole point
-    TicketWriteU32(p, 0);                 // OwnershipTicketExternalIP
-    TicketWriteU32(p, 0);                 // OwnershipTicketInternalIP
-    TicketWriteU32(p, 0x4);               // OwnershipFlags
-    TicketWriteU32(p, nowUnix);           // OwnershipTicketGenerated
-    TicketWriteU32(p, nowUnix + 24*3600); // OwnershipTicketExpires
-    TicketWriteU16(p, 0);                 // LicenseCount
-    TicketWriteU16(p, 0);                 // DLCCount
-    TicketWriteU16(p, 0);                 // Reserved
-    // Pad body to kAppTicketBody (in case we miscounted)
-    uint32 written = (uint32)(p - pBodyStart);
-    if (written < kAppTicketBody) p += (kAppTicketBody - written);
-
-    // 128-byte signature: leave as zeros (already memset).
-    p += kAppTicketSig;
-
-    return (uint32)(p - (unsigned char*)pTicket);
-}
-
-static HAuthTicket S_CALLTYPE Hooked_GetAuthSessionTicket(
-    void* pThis, void* pTicket, int cbMaxTicket,
-    uint32* pcbTicket, const SteamNetworkingIdentity* pIdentity)
-{
-    // Call the original so Steam queues the GetAuthSessionTicketResponse_t
-    // callback the game is waiting on (and so we get a valid HAuthTicket
-    // handle to return).
-    HAuthTicket h = g_pfnOriginalGetAuthSessionTicket(
-        pThis, pTicket, cbMaxTicket, pcbTicket, pIdentity);
-
-    if (g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
-        return h;
-
-    if (!pTicket || !pcbTicket || cbMaxTicket <= 0)
-    {
-        UCOLOG("[UCOnline2] GetAuthSessionTicket: no buffer to fill");
-        return h;
-    }
-
-    uint64 steamID = 0;
-    if (g_ClientCtx.SteamUser())
-        steamID = g_ClientCtx.SteamUser()->GetSteamID().ConvertToUint64();
-
-    uint32 written = BuildSyntheticAuthTicket(pTicket, cbMaxTicket, steamID, g_OriginalAppId);
-    if (written == 0)
-    {
-        UCOLOG("[UCOnline2] GetAuthSessionTicket: buffer too small for synthetic ticket (have %d)", cbMaxTicket);
-        return h;
-    }
-
-    *pcbTicket = written;
-    UCOLOG("[UCOnline2] GetAuthSessionTicket: synthesized ticket (%u bytes) AppId=%u SteamID=%llu handle=%u",
-        written, g_OriginalAppId, steamID, h);
-    return h;
-}
-
-void InstallGetAuthSessionTicketHook()
+void InstallSteamSpoofHooks()
 {
     if (g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
     {
-        UCOLOG("[UCOnline2] Skipping GetAuthSessionTicket hook: no ogAppId or same as AppId");
+        UCOLOG("[UCOnline2] Skipping spoof hooks: no ogAppId or same as AppId");
         return;
     }
 
-    if (!g_bClientReady || !g_ClientCtx.SteamUser())
+    if (!g_bClientReady)
     {
-        UCOLOG("[UCOnline2] Cannot install GetAuthSessionTicket hook: client not ready");
+        UCOLOG("[UCOnline2] Cannot install spoof hooks: client not ready");
         return;
     }
 
     MH_Initialize();
 
-    void** vtable = *reinterpret_cast<void***>(g_ClientCtx.SteamUser());
-
-    // ISteamUser vtable: [13]=GetAuthSessionTicket, [15]=BeginAuthSession
-    void* pGetTicketFn = vtable[13];
-    void* pBeginAuthFn = vtable[15];
-
-    MH_STATUS s = MH_CreateHook(pGetTicketFn, &Hooked_GetAuthSessionTicket,
-        reinterpret_cast<void**>(&g_pfnOriginalGetAuthSessionTicket));
-    if (s == MH_OK)
-    {
-        s = MH_EnableHook(pGetTicketFn);
-        if (s == MH_OK)
-            UCOLOG("[UCOnline2] GetAuthSessionTicket hook installed (AppId=%u, ogAppId=%u)",
-                g_ForcedAppId, g_OriginalAppId);
-        else
-            UCOLOG("[UCOnline2] MH_EnableHook failed for GetAuthSessionTicket: %d", s);
-    }
-    else
-    {
-        UCOLOG("[UCOnline2] MH_CreateHook failed for GetAuthSessionTicket: %d", s);
-    }
-
-    s = MH_CreateHook(pBeginAuthFn, &Hooked_BeginAuthSession,
-        reinterpret_cast<void**>(&g_pfnOriginalBeginAuthSession));
-    if (s == MH_OK)
-    {
-        s = MH_EnableHook(pBeginAuthFn);
-        if (s == MH_OK)
-            UCOLOG("[UCOnline2] BeginAuthSession hook installed");
-        else
-            UCOLOG("[UCOnline2] MH_EnableHook failed for BeginAuthSession: %d", s);
-    }
-    else
-    {
-        UCOLOG("[UCOnline2] MH_CreateHook failed for BeginAuthSession: %d", s);
-    }
-
     // ISteamUtils vtable: [9] = GetAppID.
-    // Vtable order (0-indexed):
     //   0:GetSecondsSinceAppActive  1:GetSecondsSinceComputerActive
     //   2:GetConnectedUniverse  3:GetServerRealTime  4:GetIPCountry
     //   5:GetImageSize  6:GetImageRGBA  7:GetCSERIPPort (private but
@@ -1248,15 +1037,14 @@ void InstallGetAuthSessionTicketHook()
     {
         void** utilsVT = *reinterpret_cast<void***>(g_ClientCtx.SteamUtils());
         void* pGetAppIDFn = utilsVT[9];
-        s = MH_CreateHook(pGetAppIDFn, &Hooked_GetAppID,
+        MH_STATUS s = MH_CreateHook(pGetAppIDFn, &Hooked_GetAppID,
             reinterpret_cast<void**>(&g_pfnOriginalGetAppID));
         if (s == MH_OK)
         {
-            s = MH_EnableHook(pGetAppIDFn);
-            if (s == MH_OK)
+            if (MH_EnableHook(pGetAppIDFn) == MH_OK)
                 UCOLOG("[UCOnline2] GetAppID hook installed (will return %u)", g_OriginalAppId);
             else
-                UCOLOG("[UCOnline2] MH_EnableHook failed for GetAppID: %d", s);
+                UCOLOG("[UCOnline2] MH_EnableHook failed for GetAppID");
         }
         else
         {
@@ -1272,15 +1060,14 @@ void InstallGetAuthSessionTicketHook()
     {
         void** appsVT = *reinterpret_cast<void***>(g_ClientCtx.SteamApps());
         void* pSubscribedFn = appsVT[6];
-        s = MH_CreateHook(pSubscribedFn, &Hooked_BIsSubscribedApp,
+        MH_STATUS s = MH_CreateHook(pSubscribedFn, &Hooked_BIsSubscribedApp,
             reinterpret_cast<void**>(&g_pfnOriginalBIsSubscribedApp));
         if (s == MH_OK)
         {
-            s = MH_EnableHook(pSubscribedFn);
-            if (s == MH_OK)
+            if (MH_EnableHook(pSubscribedFn) == MH_OK)
                 UCOLOG("[UCOnline2] BIsSubscribedApp hook installed");
             else
-                UCOLOG("[UCOnline2] MH_EnableHook failed for BIsSubscribedApp: %d", s);
+                UCOLOG("[UCOnline2] MH_EnableHook failed for BIsSubscribedApp");
         }
         else
         {

@@ -425,4 +425,13 @@ void UCOColor(WORD color, const char* text);
 void* InitSteamClient(HMODULE* phModule, bool bLocal, const char* iface);
 void LoadBreakpadSymbols(HMODULE hMod);
 void UpdateMinidumpSteamID(uint64 sid);
-void InstallGetAuthSessionTicketHook();
+void InstallSteamSpoofHooks();
+
+// Plugin callback patcher registry. UCO_CallbackPatcherFn is declared
+// in include/uco_plugin.h which must be included before this header.
+void UCO_RegisterCallbackPatcher(int iCallback, UCO_CallbackPatcherFn fn);
+
+// Defined in dllmain.cpp; api_client.h calls InitPlugins() on it
+// after SteamAPI_Init succeeds.
+class CDLLLoader;
+extern CDLLLoader s_PluginLoader;

@@ -274,7 +274,28 @@ S_API ESteamAPIInitResult S_CALLTYPE SteamInternal_SteamAPI_Init(const char* psz
 
 			if (g_bClientReady)
 			{
-				InstallGetAuthSessionTicketHook();
+				InstallSteamSpoofHooks();
+
+				// Build the plugin context now that Steam interfaces
+				// are resolved, then let each plugin install its
+				// game-specific hooks.
+				UCO_PluginContext ctx = {};
+				ctx.ApiVersion       = UCO_PLUGIN_API_VERSION;
+				ctx.StructSize       = sizeof(UCO_PluginContext);
+				ctx.ForcedAppId      = g_ForcedAppId;
+				ctx.OriginalAppId    = g_OriginalAppId;
+				ctx.pSteamClient     = g_ClientCtx.SteamClient();
+				ctx.pSteamUser       = g_ClientCtx.SteamUser();
+				ctx.pSteamUtils      = g_ClientCtx.SteamUtils();
+				ctx.pSteamApps       = g_ClientCtx.SteamApps();
+				ctx.pSteamFriends    = g_ClientCtx.SteamFriends();
+				ctx.pSteamMatchmaking= g_ClientCtx.SteamMatchmaking();
+				ctx.HSteamUser       = g_ClientUser;
+				ctx.HSteamPipe       = g_ClientPipe;
+				ctx.Log              = &UCOLOG;
+				ctx.RegisterCallbackPatcher = &UCO_RegisterCallbackPatcher;
+				s_PluginLoader.InitPlugins(&ctx);
+
 				return k_ESteamAPIInitResult_OK;
 			}
 

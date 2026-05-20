@@ -44,6 +44,27 @@ plugins/
   03_another_one_(dj_khaled!!).dll
 ```
 
+### Plugin ABI (v1)
+
+Plugins that want to integrate with UCOnline2 (rather than just running DllMain side effects) can export two C functions defined in [`include/uco_plugin.h`](include/uco_plugin.h):
+
+```c
+__declspec(dllexport) int  UCO_PluginInit(const UCO_PluginContext* ctx);
+__declspec(dllexport) void UCO_PluginShutdown(void);
+```
+
+- `UCO_PluginInit` is called once after `SteamAPI_Init` succeeds. The context exposes the resolved `ISteam*` interfaces, the configured AppId / ogAppId, a logger, and a callback-patcher registration function. Return 0 for success.
+- `UCO_PluginShutdown` is called on detach (in reverse load order). Use it to disable MinHook hooks and clean up.
+
+See [`plugins/outbound/`](plugins/outbound/) for a reference implementation that handles an EOS-gated game.
+
+#### What lives in core vs in a plugin
+
+Core (`steam_api64.dll`) only ships generic Steam-side spoofing:
+- `ISteamUtils::GetAppID` and `ISteamApps::BIsSubscribedApp` are vtable-hooked to report `ogAppId` so games that ask "what AppId am I, and do I own it?" get a consistent answer.
+
+Anything game-specific — ticket synthesis, `BeginAuthSession` bypass, EOSSDK hooks, custom networking, IL2CPP patches — belongs in a plugin.
+
 ## SteamStubbed
 
 If `GetStubbedLol` is enabled in the .ini file, it will attempt to patch SteamStub on the fly. This is meant for games that Steamless cannot unpack, such as Dave the Diver. However, it can be used to keep from modifying the game files at all, or as little as possible. I'm not responsible for the code, it was used from DenuvoSanctuary's original Rust code, [which can be found here](https://github.com/denuvosanctuary/steamstubbed). I
