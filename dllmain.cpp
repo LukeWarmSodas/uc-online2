@@ -983,12 +983,34 @@ typedef EBeginAuthSessionResult (S_CALLTYPE *Fn_BeginAuthSession)(
     void* pThis, const void* pAuthTicket, int cbAuthTicket, CSteamID steamID);
 
 typedef uint32 (S_CALLTYPE *Fn_GetAppID)(void* pThis);
+typedef bool   (S_CALLTYPE *Fn_BIsSubscribedApp)(void* pThis, AppId_t appID);
 
 static Fn_GetAuthSessionTicket g_pfnOriginalGetAuthSessionTicket = nullptr;
 static Fn_BeginAuthSession    g_pfnOriginalBeginAuthSession    = nullptr;
 static Fn_GetAppID            g_pfnOriginalGetAppID            = nullptr;
+static Fn_BIsSubscribedApp    g_pfnOriginalBIsSubscribedApp    = nullptr;
 static uint32 g_TicketSerial = 0;
 static bool   g_bGetAppIDLoggedFirst = false;
+static bool   g_bSubscribedLoggedFirst = false;
+
+// Many games gate multiplayer behind "do you actually own this AppId?"
+// via ISteamApps::BIsSubscribedApp(GetAppID()). Real Steam answers
+// false because the user owns Spacewar (480), not the real AppId.
+// Return true for the ogAppId (matches OnlineFix's behavior).
+static bool S_CALLTYPE Hooked_BIsSubscribedApp(void* pThis, AppId_t appID)
+{
+    bool original = g_pfnOriginalBIsSubscribedApp(pThis, appID);
+    if (g_OriginalAppId != 0 && appID == g_OriginalAppId && !original)
+    {
+        if (!g_bSubscribedLoggedFirst)
+        {
+            UCOLOG("[UCOnline2] BIsSubscribedApp(%u) hook returning true (Steam says false)", appID);
+            g_bSubscribedLoggedFirst = true;
+        }
+        return true;
+    }
+    return original;
+}
 
 // Game compares the AppId field inside the auth ticket against
 // ISteamUtils::GetAppID() before passing the ticket onward. With
@@ -1062,7 +1084,13 @@ static uint32 BuildSyntheticAuthTicket(
     // Total: 236 bytes (no licenses, no DLCs).
     const uint32 kGCTokenLen      = 20;
     const uint32 kSessionHdrLen   = 24;
-    const uint32 kAppTicketBody   = 52;
+    // AppOwnershipTicket body: 4 (ver) + 8 (sid) + 4 (appid) + 4 (extIP)
+    //   + 4 (intIP) + 4 (flags) + 4 (gen) + 4 (exp) + 2 (lic#)
+    //   + 2 (dlc#) + 2 (reserved) = 42 bytes. Previous code padded to
+    //   52 which inserted 10 garbage bytes between Reserved and the
+    //   signature; parsers using LicenseCount/DLCCount to locate the
+    //   signature would land on junk.
+    const uint32 kAppTicketBody   = 42;
     const uint32 kAppTicketSig    = 128;
     const uint32 kAppTicketLen    = kAppTicketBody + kAppTicketSig;
     const uint32 kTotal = 4 + kGCTokenLen
@@ -1233,6 +1261,30 @@ void InstallGetAuthSessionTicketHook()
         else
         {
             UCOLOG("[UCOnline2] MH_CreateHook failed for GetAppID: %d", s);
+        }
+    }
+
+    // ISteamApps vtable: [6] = BIsSubscribedApp.
+    //   0:BIsSubscribed  1:BIsLowViolence  2:BIsCybercafe  3:BIsVACBanned
+    //   4:GetCurrentGameLanguage  5:GetAvailableGameLanguages
+    //   6:BIsSubscribedApp
+    if (g_ClientCtx.SteamApps())
+    {
+        void** appsVT = *reinterpret_cast<void***>(g_ClientCtx.SteamApps());
+        void* pSubscribedFn = appsVT[6];
+        s = MH_CreateHook(pSubscribedFn, &Hooked_BIsSubscribedApp,
+            reinterpret_cast<void**>(&g_pfnOriginalBIsSubscribedApp));
+        if (s == MH_OK)
+        {
+            s = MH_EnableHook(pSubscribedFn);
+            if (s == MH_OK)
+                UCOLOG("[UCOnline2] BIsSubscribedApp hook installed");
+            else
+                UCOLOG("[UCOnline2] MH_EnableHook failed for BIsSubscribedApp: %d", s);
+        }
+        else
+        {
+            UCOLOG("[UCOnline2] MH_CreateHook failed for BIsSubscribedApp: %d", s);
         }
     }
 }
