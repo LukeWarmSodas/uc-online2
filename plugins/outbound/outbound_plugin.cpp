@@ -469,6 +469,26 @@ static Fn_OnCustomAuthenticationResponse g_pfnOrigNetworkEventsOnCustomAuthRespo
 typedef void (__fastcall *Fn_NetworkManagerOnShutdown)(void* pThis, void* runner, int shutdownReason);
 static Fn_NetworkManagerOnShutdown g_pfnOrigNetworkManagerOnShutdown = nullptr;
 
+// PhotonAppSettings.get_Global() -- static getter, no args, returns PhotonAppSettings*
+typedef void* (__fastcall *Fn_PhotonAppSettings_get_Global)();
+static Fn_PhotonAppSettings_get_Global g_pfnOrigPhotonAppSettingsGetGlobal = nullptr;
+
+// Our replacement GUID for Fusion AppId, read from the ini.
+// Stored as the managed System.String pointer (created lazily on
+// first hook fire after IL2CPP runtime is ready).
+static char  g_OurFusionAppIdUtf8[64] = {};
+static void* g_OurFusionAppIdString    = nullptr;  // Il2CppString*
+static bool  g_AppIdPatchEnabled       = false;
+
+// Field offsets confirmed from il2cpp dump (TypeDefIndex 18602):
+//   PhotonAppSettings.AppSettings @ 0x20
+//   FusionAppSettings.AppIdRealtime @ 0x10
+//   FusionAppSettings.AppIdFusion   @ 0x18
+//   FusionAppSettings.AppIdChat     @ 0x20
+//   FusionAppSettings.AppIdVoice    @ 0x28
+static const size_t kOffsetPhotonAppSettings_AppSettings = 0x20;
+static const size_t kOffsetFusionAppSettings_AppIdFusion = 0x18;
+
 static void __fastcall Hooked_OnCustomAuthenticationFailed(void* pThis, void* debugMessage)
 {
     LOG("[Outbound] Fusion.CloudServices.OnCustomAuthenticationFailed suppressed");
@@ -501,6 +521,65 @@ static void __fastcall Hooked_NetworkManagerOnShutdown(void* pThis, void* runner
     LOG("[Outbound] NetworkManager.OnShutdown(reason=%d) suppressed", shutdownReason);
     // Do not call original: the original would display
     // "Failed(reason): '<debug message>'" to the user.
+}
+
+// On every call: get the real PhotonAppSettings, then patch
+// its embedded FusionAppSettings.AppIdFusion field to our GUID.
+// We allocate the Il2CppString lazily on the first call (we
+// can't safely allocate before the il2cpp domain is ready, and
+// even though IL2CPP_TryInit has succeeded by the time hooks
+// fire, doing the allocation inside the hook keeps us on the
+// thread that owns the domain attach).
+static void* __fastcall Hooked_PhotonAppSettings_get_Global()
+{
+    void* settings = g_pfnOrigPhotonAppSettingsGetGlobal();
+    if (!settings || !g_AppIdPatchEnabled) return settings;
+
+    if (!g_OurFusionAppIdString)
+    {
+        g_OurFusionAppIdString = IL2CPP_StringNew(g_OurFusionAppIdUtf8);
+        if (!g_OurFusionAppIdString)
+        {
+            LOG("[Outbound] AppId patch: IL2CPP_StringNew failed");
+            return settings;
+        }
+        LOG("[Outbound] AppId patch: built managed string for '%s' at %p",
+            g_OurFusionAppIdUtf8, g_OurFusionAppIdString);
+    }
+
+    // settings -> PhotonAppSettings instance
+    void** pAppSettingsField = (void**)((char*)settings + kOffsetPhotonAppSettings_AppSettings);
+    void* appSettings = *pAppSettingsField;
+    if (!appSettings) return settings;
+
+    void** pAppIdFusion = (void**)((char*)appSettings + kOffsetFusionAppSettings_AppIdFusion);
+    void* oldStr = *pAppIdFusion;
+    if (oldStr != g_OurFusionAppIdString)
+    {
+        *pAppIdFusion = g_OurFusionAppIdString;
+        LOG("[Outbound] AppId patch: FusionAppSettings.AppIdFusion replaced (was %p)", oldStr);
+    }
+    return settings;
+}
+
+// Resolve %EXEDIR%\union-crax.ini once, cache result.
+static const char* GetIniPath()
+{
+    static char path[MAX_PATH] = {};
+    static bool computed = false;
+    if (computed) return path[0] ? path : nullptr;
+    computed = true;
+
+    char exeDir[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameA(nullptr, exeDir, MAX_PATH);
+    if (len == 0) return nullptr;
+    // Strip filename
+    for (int i = (int)len - 1; i >= 0; --i) {
+        if (exeDir[i] == '\\' || exeDir[i] == '/') { exeDir[i] = 0; break; }
+    }
+    int n = _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\union-crax.ini", exeDir);
+    if (n <= 0) { path[0] = 0; return nullptr; }
+    return path;
 }
 
 static bool InstallIl2CppHook(const char* image, const char* ns, const char* klass,
@@ -584,6 +663,21 @@ static void TryInstallIl2CppHooks()
         (void*)&Hooked_NetworkManagerOnShutdown,
         (void**)&g_pfnOrigNetworkManagerOnShutdown,
         "NetworkManager.OnShutdown");
+
+    // PhotonAppId patch path (the actual working approach):
+    // hook PhotonAppSettings.get_Global so every consumer
+    // sees the patched AppIdFusion -- redirecting the game
+    // to a Photon Fusion app the user controls, where no
+    // backend custom-auth check rejects them.
+    if (g_AppIdPatchEnabled)
+    {
+        InstallIl2CppHook(
+            "Fusion.Realtime", "Fusion.Photon.Realtime", "PhotonAppSettings",
+            "get_Global", 0,
+            (void*)&Hooked_PhotonAppSettings_get_Global,
+            (void**)&g_pfnOrigPhotonAppSettingsGetGlobal,
+            "PhotonAppSettings.get_Global");
+    }
 }
 
 static DWORD WINAPI WatcherProc(LPVOID)
@@ -651,6 +745,27 @@ extern "C" __declspec(dllexport) int __cdecl UCO_PluginInit(const UCO_PluginCont
 
     LOG("[Outbound] plugin v1 init: AppId=%u ogAppId=%u",
         g_ForcedAppId, g_OriginalAppId);
+
+    // Read [Outbound] PhotonAppIdFusion from union-crax.ini.
+    // If set (typically a 36-char GUID from the user's own
+    // Photon Fusion Cloud app), we patch the game to use it
+    // -- bypassing Outbound's backend-validated custom auth.
+    const char* ini = GetIniPath();
+    if (ini)
+    {
+        GetPrivateProfileStringA("Outbound", "PhotonAppIdFusion", "",
+                                 g_OurFusionAppIdUtf8,
+                                 sizeof(g_OurFusionAppIdUtf8), ini);
+        if (g_OurFusionAppIdUtf8[0])
+        {
+            g_AppIdPatchEnabled = true;
+            LOG("[Outbound] PhotonAppIdFusion override set: %s", g_OurFusionAppIdUtf8);
+        }
+        else
+        {
+            LOG("[Outbound] no [Outbound]PhotonAppIdFusion in ini -- AppId patch disabled");
+        }
+    }
 
     if (g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
     {

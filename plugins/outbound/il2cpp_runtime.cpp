@@ -15,6 +15,7 @@ typedef const char*          (*Fn_il2cpp_image_get_name)(const Il2CppImage*);
 typedef Il2CppClass*         (*Fn_il2cpp_class_from_name)(const Il2CppImage*, const char*, const char*);
 typedef const MethodInfo*    (*Fn_il2cpp_class_get_method_from_name)(Il2CppClass*, const char*, int);
 typedef void                 (*Fn_il2cpp_thread_attach)(Il2CppDomain*);
+typedef void*                (*Fn_il2cpp_string_new)(const char*);
 
 static HMODULE g_hGameAssembly = nullptr;
 static bool    g_bReady        = false;
@@ -26,6 +27,7 @@ static Fn_il2cpp_image_get_name              g_image_get_name              = nul
 static Fn_il2cpp_class_from_name             g_class_from_name             = nullptr;
 static Fn_il2cpp_class_get_method_from_name  g_class_get_method_from_name  = nullptr;
 static Fn_il2cpp_thread_attach               g_thread_attach               = nullptr;
+static Fn_il2cpp_string_new                  g_string_new                  = nullptr;
 
 #define RESOLVE(name) \
     do { \
@@ -50,6 +52,7 @@ bool IL2CPP_TryInit(void)
     RESOLVE(class_from_name);
     RESOLVE(class_get_method_from_name);
     RESOLVE(thread_attach);
+    RESOLVE(string_new);
 
     // Attach the current native thread to the IL2CPP domain so we
     // can call into managed code safely. Required before any
@@ -142,4 +145,10 @@ void* IL2CPP_FindMethodPtr(const char* imageName,
         return nullptr;
     }
     return m->methodPointer;
+}
+
+void* IL2CPP_StringNew(const char* utf8)
+{
+    if (!g_bReady || !g_string_new || !utf8) return nullptr;
+    return g_string_new(utf8);
 }

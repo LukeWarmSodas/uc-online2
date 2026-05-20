@@ -71,6 +71,34 @@ msbuild plugins\outbound\outbound_plugin.vcxproj `
 
 Output: `plugins\outbound\relbuild\x64\outbound.dll`. Drop into `<game>\plugins\outbound.dll`.
 
+## Recommended approach: Photon AppId override
+
+Outbound's multiplayer auth is gated by **Photon Fusion custom auth**: the master server forwards the Steam ticket to Outbound's backend, which validates via Steam Web API and rejects tickets signed for AppId 480 (Spacewar) instead of 2681030. Suppressing the failure callback hides the UI error but the connection is still dead.
+
+The clean workaround is to **redirect the game to a Photon Fusion app you control**, where custom auth is disabled (or trivially permissive). Then there is no rejection. Your players will see only other players on the same redirected app — which for a closed friend group is exactly what you want.
+
+### Steps
+
+1. Sign up at <https://dashboard.photonengine.com/> (free).
+2. Create a new app, type **Fusion**.
+3. Copy the AppId GUID it gives you.
+4. Add it to your `union-crax.ini`:
+
+   ```ini
+   [Settings]
+   AppId=480
+   ogAppId=2681030
+   PluginsFolder=plugins
+   GetStubbedLol=false
+
+   [Outbound]
+   PhotonAppIdFusion=<your-guid-here>
+   ```
+
+5. On next launch, the plugin hooks `Fusion.Photon.Realtime.PhotonAppSettings.get_Global` and overwrites the embedded `FusionAppSettings.AppIdFusion` with your GUID. The log will show `[Outbound] AppId patch: FusionAppSettings.AppIdFusion replaced`.
+
+If `PhotonAppIdFusion` isn't set in the ini, the AppId hook is not installed and the plugin behaves as before (auth still fails on Outbound's app).
+
 ## Limitations
 
 - IL2CPP hooks are sensitive to the C# method's argument layout. If the game updates and changes the method signature (added/removed an argument), the hook must be updated.

@@ -80,6 +80,12 @@ void* IL2CPP_FindMethodPtr(const char* imageName,
                            const char* methodName,
                            int argCount);
 
+// Allocate a new managed System.String from a UTF-8 C string.
+// Returned pointer is GC-managed -- the il2cpp domain owns it.
+// Returns nullptr if the runtime isn't ready or allocation
+// fails.
+void* IL2CPP_StringNew(const char* utf8);
+
 #ifdef __cplusplus
 }
 #endif
