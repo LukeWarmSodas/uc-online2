@@ -1,8 +1,9 @@
 #include "include/eos_hooks.h"
 #include "include/MinHook.h"
-#include "include/globals.h"
 
 #include <Windows.h>
+
+extern void UCOLOG(const char* fmt, ...);
 
 // Resolved on first install attempt.
 static HMODULE                g_hEosSdk                       = nullptr;
