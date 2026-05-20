@@ -485,6 +485,14 @@ static Fn_AuthValues_set_AuthType g_pfnOrigAuthValuesSetAuthType = nullptr;
 typedef void (__fastcall *Fn_AuthValues_set_Token)(void* pThis, void* value);
 static Fn_AuthValues_set_Token g_pfnOrigAuthValuesSetToken = nullptr;
 
+// LoadBalancingClient.set_AppId(string) -- the connection-time
+// AppId, copied from FusionAppSettings just before Connect.
+// The PhotonAppSettings patch doesn't reach this because
+// Fusion's RelayClient maintains its own FusionAppSettings copy
+// in Config @ offset 0x1D8.
+typedef void (__fastcall *Fn_LBC_set_AppId)(void* pThis, void* value);
+static Fn_LBC_set_AppId g_pfnOrigLBCsetAppId = nullptr;
+
 // Our replacement GUID for Fusion AppId, read from the ini.
 // Stored as the managed System.String pointer (created lazily on
 // first hook fire after IL2CPP runtime is ready).
@@ -586,6 +594,25 @@ static void __fastcall Hooked_AuthValues_set_Token(void* pThis, void* value)
     if (value)
         LOG("[Outbound] AuthenticationValues.set_Token(%p) -> forced null", value);
     g_pfnOrigAuthValuesSetToken(pThis, nullptr);
+}
+
+static void __fastcall Hooked_LBC_set_AppId(void* pThis, void* value)
+{
+    // If we already have our managed-string version of the GUID,
+    // force the connection AppId to use it. Otherwise pass the
+    // original through -- this can happen briefly before the
+    // get_Global hook has fired to lazy-build the string.
+    if (g_OurFusionAppIdString)
+    {
+        LOG("[Outbound] LoadBalancingClient.set_AppId(%p) -> overridden to our GUID (%p)",
+            value, g_OurFusionAppIdString);
+        g_pfnOrigLBCsetAppId(pThis, g_OurFusionAppIdString);
+    }
+    else
+    {
+        LOG("[Outbound] LoadBalancingClient.set_AppId(%p) -> passthrough (our string not ready yet)", value);
+        g_pfnOrigLBCsetAppId(pThis, value);
+    }
 }
 
 static void* __fastcall Hooked_PhotonAppSettings_get_Global()
@@ -755,6 +782,17 @@ static void TryInstallIl2CppHooks()
             (void*)&Hooked_AuthValues_set_Token,
             (void**)&g_pfnOrigAuthValuesSetToken,
             "AuthenticationValues.set_Token");
+
+        // Critical: catch the AppId at the connection layer.
+        // Fusion.Photon.Realtime.LoadBalancingClient.set_AppId is
+        // called immediately before connecting -- this is where
+        // the AppId really matters.
+        InstallIl2CppHook(
+            "Fusion.Realtime", "Fusion.Photon.Realtime", "LoadBalancingClient",
+            "set_AppId", 1,
+            (void*)&Hooked_LBC_set_AppId,
+            (void**)&g_pfnOrigLBCsetAppId,
+            "LoadBalancingClient.set_AppId");
     }
 }
 
