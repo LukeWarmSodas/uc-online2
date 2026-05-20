@@ -982,9 +982,35 @@ typedef HAuthTicket (S_CALLTYPE *Fn_GetAuthSessionTicket)(
 typedef EBeginAuthSessionResult (S_CALLTYPE *Fn_BeginAuthSession)(
     void* pThis, const void* pAuthTicket, int cbAuthTicket, CSteamID steamID);
 
+typedef uint32 (S_CALLTYPE *Fn_GetAppID)(void* pThis);
+
 static Fn_GetAuthSessionTicket g_pfnOriginalGetAuthSessionTicket = nullptr;
 static Fn_BeginAuthSession    g_pfnOriginalBeginAuthSession    = nullptr;
+static Fn_GetAppID            g_pfnOriginalGetAppID            = nullptr;
 static uint32 g_TicketSerial = 0;
+static bool   g_bGetAppIDLoggedFirst = false;
+
+// Game compares the AppId field inside the auth ticket against
+// ISteamUtils::GetAppID() before passing the ticket onward. With
+// the spoofed init AppId, real Steam reports 480 from GetAppID
+// while our synthesized ticket carries ogAppId -- mismatch produces
+// "Failed(2): Ticket for other app". Return ogAppId so they match
+// (and so other game systems see the "real" AppId, matching
+// OnlineFix's RealAppId behavior).
+static uint32 S_CALLTYPE Hooked_GetAppID(void* pThis)
+{
+    uint32 original = g_pfnOriginalGetAppID(pThis);
+    if (g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
+        return original;
+
+    if (!g_bGetAppIDLoggedFirst)
+    {
+        UCOLOG("[UCOnline2] GetAppID hook returning ogAppId=%u (Steam reports %u)",
+            g_OriginalAppId, original);
+        g_bGetAppIDLoggedFirst = true;
+    }
+    return g_OriginalAppId;
+}
 
 // Always tell the game that BeginAuthSession succeeded -- Steam would
 // otherwise return k_EBeginAuthSessionResultGameMismatch because the
@@ -1182,6 +1208,32 @@ void InstallGetAuthSessionTicketHook()
     else
     {
         UCOLOG("[UCOnline2] MH_CreateHook failed for BeginAuthSession: %d", s);
+    }
+
+    // ISteamUtils vtable: [9] = GetAppID.
+    // Vtable order (0-indexed):
+    //   0:GetSecondsSinceAppActive  1:GetSecondsSinceComputerActive
+    //   2:GetConnectedUniverse  3:GetServerRealTime  4:GetIPCountry
+    //   5:GetImageSize  6:GetImageRGBA  7:GetCSERIPPort (private but
+    //   present in vtable)  8:GetCurrentBatteryPower  9:GetAppID
+    if (g_ClientCtx.SteamUtils())
+    {
+        void** utilsVT = *reinterpret_cast<void***>(g_ClientCtx.SteamUtils());
+        void* pGetAppIDFn = utilsVT[9];
+        s = MH_CreateHook(pGetAppIDFn, &Hooked_GetAppID,
+            reinterpret_cast<void**>(&g_pfnOriginalGetAppID));
+        if (s == MH_OK)
+        {
+            s = MH_EnableHook(pGetAppIDFn);
+            if (s == MH_OK)
+                UCOLOG("[UCOnline2] GetAppID hook installed (will return %u)", g_OriginalAppId);
+            else
+                UCOLOG("[UCOnline2] MH_EnableHook failed for GetAppID: %d", s);
+        }
+        else
+        {
+            UCOLOG("[UCOnline2] MH_CreateHook failed for GetAppID: %d", s);
+        }
     }
 }
 
