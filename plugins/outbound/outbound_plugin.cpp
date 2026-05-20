@@ -317,6 +317,56 @@ static Fn_EOS_Ecom_QueryOwnershipToken g_pfnOrigEosEcomQueryOwnership = nullptr;
 // rather than empty.
 static const char* kFakeOwnershipToken = "ucoco-synthetic-ownership-token";
 
+// ---- EOS_Ecom_QueryOwnershipBySandboxIds --------------------
+// First call in EpicManager.GetOwnershipVerificationToken's
+// two-step chain. b__0 in the dump fires on its completion;
+// if this fails the chain stops before QueryOwnershipToken
+// ever runs (which is why our QueryOwnershipToken hook never
+// got an intercept).
+//
+// Struct layout from il2cpp dump (TypeDefIndex 7146 / internal):
+//   ResultCode               @ 0x00 (4 bytes)
+//   ClientData               @ 0x08
+//   LocalUserId              @ 0x10
+//   SandboxIdItemOwnerships  @ 0x18 (pointer, can be null)
+//   SandboxIdItemOwnershipsCount @ 0x20 (uint32)
+
+typedef struct EOS_Ecom_QueryOwnershipBySandboxIdsCallbackInfo
+{
+    EOS_EResult       ResultCode;                        // 0x00
+    void*             ClientData;                        // 0x08
+    EOS_EpicAccountId LocalUserId;                       // 0x10
+    const void*       SandboxIdItemOwnerships;           // 0x18
+    uint32_t          SandboxIdItemOwnershipsCount;      // 0x20
+    uint32_t          _pad;                              // 0x24 (align to 8)
+} EOS_Ecom_QueryOwnershipBySandboxIdsCallbackInfo;
+
+typedef void (__cdecl *EOS_Ecom_OnQueryOwnershipBySandboxIdsCallback)(
+    const EOS_Ecom_QueryOwnershipBySandboxIdsCallbackInfo* Data);
+
+typedef void (__cdecl *Fn_EOS_Ecom_QueryOwnershipBySandboxIds)(
+    void* Handle, const void* Options, void* ClientData,
+    EOS_Ecom_OnQueryOwnershipBySandboxIdsCallback CompletionDelegate);
+
+static Fn_EOS_Ecom_QueryOwnershipBySandboxIds g_pfnOrigEosEcomQueryOwnershipBySandboxIds = nullptr;
+
+static void __cdecl Hooked_EOS_Ecom_QueryOwnershipBySandboxIds(
+    void* Handle, const void* Options, void* ClientData,
+    EOS_Ecom_OnQueryOwnershipBySandboxIdsCallback CompletionDelegate)
+{
+    LOG("[Outbound] EOS_Ecom_QueryOwnershipBySandboxIds intercept");
+    if (!CompletionDelegate) return;
+
+    EOS_Ecom_QueryOwnershipBySandboxIdsCallbackInfo info = {};
+    info.ResultCode                    = EOS_EResult_Success;
+    info.ClientData                    = ClientData;
+    info.LocalUserId                   = (EOS_EpicAccountId)(uintptr_t)(++g_FakeEaidCounter);
+    info.SandboxIdItemOwnerships       = nullptr;
+    info.SandboxIdItemOwnershipsCount  = 0;
+    CompletionDelegate(&info);
+    LOG("[Outbound] EOS_Ecom_QueryOwnershipBySandboxIds: fired Success (empty array)");
+}
+
 static void __cdecl Hooked_EOS_Ecom_QueryOwnershipToken(
     void* Handle, const void* Options, void* ClientData,
     EOS_Ecom_OnQueryOwnershipTokenCallback CompletionDelegate)
@@ -385,6 +435,9 @@ static bool TryInstallEosHooks()
     any |= InstallEosHook(hEos, "EOS_Ecom_QueryOwnershipToken",
                           (void*)&Hooked_EOS_Ecom_QueryOwnershipToken,
                           (void**)&g_pfnOrigEosEcomQueryOwnership);
+    any |= InstallEosHook(hEos, "EOS_Ecom_QueryOwnershipBySandboxIds",
+                          (void*)&Hooked_EOS_Ecom_QueryOwnershipBySandboxIds,
+                          (void**)&g_pfnOrigEosEcomQueryOwnershipBySandboxIds);
     installed = any;
     return any;
 }
