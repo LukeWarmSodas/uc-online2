@@ -389,6 +389,7 @@ extern char g_InstallPath[MAX_PATH];
 extern bool g_bHaveInstallPath;
 extern SRWLOCK g_CallbackLock;
 extern uint32 g_ForcedAppId;
+extern uint32 g_OriginalAppId;
 
 typedef void* (S_CALLTYPE* Fn_CreateInterface)(const char* pName, int* pReturnCode);
 extern Fn_CreateInterface g_pfnCreateInterface;
@@ -424,3 +425,4 @@ void UCOColor(WORD color, const char* text);
 void* InitSteamClient(HMODULE* phModule, bool bLocal, const char* iface);
 void LoadBreakpadSymbols(HMODULE hMod);
 void UpdateMinidumpSteamID(uint64 sid);
+void InstallGetAuthSessionTicketHook();

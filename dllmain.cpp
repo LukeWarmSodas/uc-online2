@@ -902,6 +902,119 @@ static DWORD WINAPI SteamStub_HookGetTickCount(void)
 	return g_OrigGetTickCount();
 }
 
+// ============================================================
+// GetAuthSessionTicket Hook
+//
+// Fixes "ticket for other app" errors with matchmaking servers
+// when using a spoofed AppId (Spacewar/480) for the Steam
+// connection.
+//
+// We let Steam generate the real ticket against the FakeAppId
+// (g_ForcedAppId), then scan the ticket buffer for that AppId
+// as a uint32 LE and overwrite each occurrence with the real
+// AppId (g_OriginalAppId, set via `ogAppId` in the ini). This
+// lets the game server's BeginAuthSession accept the ticket
+// because the embedded AppId now matches what the matchmaking
+// layer expects.
+// ============================================================
+
+typedef HAuthTicket (S_CALLTYPE *Fn_GetAuthSessionTicket)(
+    void* pThis, void* pTicket, int cbMaxTicket,
+    uint32* pcbTicket, const SteamNetworkingIdentity* pIdentity);
+
+static Fn_GetAuthSessionTicket g_pfnOriginalGetAuthSessionTicket = nullptr;
+
+static HAuthTicket S_CALLTYPE Hooked_GetAuthSessionTicket(
+    void* pThis, void* pTicket, int cbMaxTicket,
+    uint32* pcbTicket, const SteamNetworkingIdentity* pIdentity)
+{
+    HAuthTicket h = g_pfnOriginalGetAuthSessionTicket(
+        pThis, pTicket, cbMaxTicket, pcbTicket, pIdentity);
+
+    if (g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
+    {
+        return h;
+    }
+
+    if (!pTicket || !pcbTicket || *pcbTicket == 0)
+    {
+        UCOLOG("[UCOnline2] GetAuthSessionTicket: nothing to rewrite");
+        return h;
+    }
+
+    uint32 cb = *pcbTicket;
+    if (cb > (uint32)cbMaxTicket) cb = (uint32)cbMaxTicket;
+
+    uint32 scanLen = (cb < 128) ? cb : 128;
+    if (scanLen < 4) return h;
+
+    unsigned char* p = (unsigned char*)pTicket;
+    uint32 needle = g_ForcedAppId;
+    uint32 replace = g_OriginalAppId;
+    int rewrites = 0;
+
+    for (uint32 i = 0; i + 4 <= scanLen; i++)
+    {
+        uint32 val = (uint32)p[i]
+                   | ((uint32)p[i+1] << 8)
+                   | ((uint32)p[i+2] << 16)
+                   | ((uint32)p[i+3] << 24);
+        if (val == needle)
+        {
+            p[i]   = (unsigned char)(replace & 0xFF);
+            p[i+1] = (unsigned char)((replace >> 8) & 0xFF);
+            p[i+2] = (unsigned char)((replace >> 16) & 0xFF);
+            p[i+3] = (unsigned char)((replace >> 24) & 0xFF);
+            rewrites++;
+            i += 3;
+        }
+    }
+
+    UCOLOG("[UCOnline2] GetAuthSessionTicket: rewrote %d AppId field(s) from %u to %u (ticket size %u)",
+        rewrites, g_ForcedAppId, g_OriginalAppId, cb);
+
+    return h;
+}
+
+void InstallGetAuthSessionTicketHook()
+{
+    if (g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
+    {
+        UCOLOG("[UCOnline2] Skipping GetAuthSessionTicket hook: no ogAppId or same as AppId");
+        return;
+    }
+
+    if (!g_bClientReady || !g_ClientCtx.SteamUser())
+    {
+        UCOLOG("[UCOnline2] Cannot install GetAuthSessionTicket hook: client not ready");
+        return;
+    }
+
+    MH_Initialize();
+
+    void** vtable = *reinterpret_cast<void***>(g_ClientCtx.SteamUser());
+
+    // ISteamUser vtable index 13 = GetAuthSessionTicket
+    void* pOriginalFunc = vtable[13];
+
+    MH_STATUS s = MH_CreateHook(pOriginalFunc, &Hooked_GetAuthSessionTicket,
+        reinterpret_cast<void**>(&g_pfnOriginalGetAuthSessionTicket));
+
+    if (s == MH_OK)
+    {
+        s = MH_EnableHook(pOriginalFunc);
+        if (s == MH_OK)
+            UCOLOG("[UCOnline2] GetAuthSessionTicket hook installed (FakeAppId=%u, RealAppId=%u)",
+                g_ForcedAppId, g_OriginalAppId);
+        else
+            UCOLOG("[UCOnline2] MH_EnableHook failed for GetAuthSessionTicket: %d", s);
+    }
+    else
+    {
+        UCOLOG("[UCOnline2] MH_CreateHook failed for GetAuthSessionTicket: %d", s);
+    }
+}
+
 static void SteamStub_Init()
 {
 	if (MH_Initialize() != MH_OK)

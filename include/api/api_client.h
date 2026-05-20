@@ -274,7 +274,7 @@ S_API ESteamAPIInitResult S_CALLTYPE SteamInternal_SteamAPI_Init(const char* psz
 
 			if (g_bClientReady)
 			{
-
+				InstallGetAuthSessionTicketHook();
 				return k_ESteamAPIInitResult_OK;
 			}
 
