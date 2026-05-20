@@ -552,8 +552,30 @@ static void __fastcall Hooked_NetworkManagerOnShutdown(void* pThis, void* runner
 // Force AuthType to None (255). Photon then treats the
 // client as anonymous, skips provider validation entirely,
 // and accepts the connection on apps that allow anonymous.
+// Force-trigger flag for the PhotonAppSettings cached-singleton workaround.
+static volatile LONG g_TriedForceGlobal = 0;
+
+// Forward declaration -- the set_AuthType hook invokes this to apply
+// the AppId patch on the cached singleton.
+static void* __fastcall Hooked_PhotonAppSettings_get_Global();
+
 static void __fastcall Hooked_AuthValues_set_AuthType(void* pThis, unsigned int value)
 {
+    // The game caches PhotonAppSettings before our hook installs, so
+    // get_Global is never naturally called after that. The first
+    // set_AuthType call is guaranteed to be on Unity's main thread
+    // (this is where managed objects are being constructed during
+    // the multiplayer/lobby init), so use it as a safe trampoline
+    // to invoke our get_Global hook -- which patches the cached
+    // PhotonAppSettings.AppIdFusion field for the FIRST time.
+    if (g_AppIdPatchEnabled
+        && InterlockedExchange(&g_TriedForceGlobal, 1) == 0
+        && g_pfnOrigPhotonAppSettingsGetGlobal != nullptr)
+    {
+        LOG("[Outbound] forcing PhotonAppSettings.get_Global to apply AppId patch");
+        Hooked_PhotonAppSettings_get_Global();
+    }
+
     if (value != 255)
         LOG("[Outbound] AuthenticationValues.set_AuthType(%u) -> forced 255 (None)", value);
     g_pfnOrigAuthValuesSetAuthType(pThis, 255);
