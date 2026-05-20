@@ -370,6 +370,47 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 
 static bool s_bDispatcherReady = false;
 
+// ============================================================
+// Auth-callback patcher
+//
+// Steam fires GetAuthSessionTicketResponse_t (k_iCallback=163)
+// after GetAuthSessionTicket. Because we synthesize a ticket
+// whose signature doesn't match Steam's expected key for
+// AppId=480, Steam reports m_eResult=k_EResultFail (=2) -- the
+// game shows that as "Failed(2): Ticket for other app".
+// Likewise ValidateAuthTicketResponse_t (k_iCallback=143) can
+// come back non-OK on incoming tickets for the same reason.
+// Force both to OK before the game's registered CCallback sees
+// them.
+// ============================================================
+static void PatchAuthCallback(int iCallback, uint8* pBuf, uint32 cbBuf)
+{
+    if (!pBuf || cbBuf == 0) return;
+
+    // GetAuthSessionTicketResponse_t = k_iSteamUserCallbacks(100) + 63
+    if (iCallback == 163 && cbBuf >= sizeof(GetAuthSessionTicketResponse_t))
+    {
+        GetAuthSessionTicketResponse_t* p = (GetAuthSessionTicketResponse_t*)pBuf;
+        if (p->m_eResult != k_EResultOK)
+        {
+            UCOLOG("[UCOnline2] Forcing GetAuthSessionTicketResponse %d->OK (handle=%u)",
+                (int)p->m_eResult, p->m_hAuthTicket);
+            p->m_eResult = k_EResultOK;
+        }
+    }
+    // ValidateAuthTicketResponse_t = k_iSteamUserCallbacks(100) + 43
+    else if (iCallback == 143 && cbBuf >= sizeof(ValidateAuthTicketResponse_t))
+    {
+        ValidateAuthTicketResponse_t* p = (ValidateAuthTicketResponse_t*)pBuf;
+        if (p->m_eAuthSessionResponse != k_EAuthSessionResponseOK)
+        {
+            UCOLOG("[UCOnline2] Forcing ValidateAuthTicketResponse %d->OK (sid=%llu)",
+                (int)p->m_eAuthSessionResponse, p->m_SteamID.ConvertToUint64());
+            p->m_eAuthSessionResponse = k_EAuthSessionResponseOK;
+        }
+    }
+}
+
 CCallbackDispatcher::CCallbackDispatcher()
 {
 	UCOColor(FOREGROUND_BLUE | FOREGROUND_INTENSITY, "[UCOnline2] CCallbackDispatcher constructed\r\n");
@@ -511,6 +552,8 @@ void CCallbackDispatcher::DispatchFrame(HSteamPipe hPipe, bool bServer)
 								bSkip = true;
 						}
 
+						PatchAuthCallback(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
+
 						if (!bSkip)
 							pCb->Run(msg.m_pubParam);
 
@@ -576,6 +619,7 @@ void CCallbackDispatcher::DispatchFrameSafe(HSteamPipe hPipe, bool bServer)
 						else if (msg.m_hSteamUser == g_ClientUser && !(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && !bServer)
 						{
 							UCOLOG("[UCOnline2] Client callback (safe) -> %d flags=%d\r\n", msg.m_iCallback, pCb->m_nCallbackFlags);
+							PatchAuthCallback(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
 							pCb->Run(msg.m_pubParam);
 							break;
 						}
@@ -920,8 +964,27 @@ typedef HAuthTicket (S_CALLTYPE *Fn_GetAuthSessionTicket)(
     void* pThis, void* pTicket, int cbMaxTicket,
     uint32* pcbTicket, const SteamNetworkingIdentity* pIdentity);
 
+typedef EBeginAuthSessionResult (S_CALLTYPE *Fn_BeginAuthSession)(
+    void* pThis, const void* pAuthTicket, int cbAuthTicket, CSteamID steamID);
+
 static Fn_GetAuthSessionTicket g_pfnOriginalGetAuthSessionTicket = nullptr;
+static Fn_BeginAuthSession    g_pfnOriginalBeginAuthSession    = nullptr;
 static uint32 g_TicketSerial = 0;
+
+// Always tell the game that BeginAuthSession succeeded -- Steam would
+// otherwise return k_EBeginAuthSessionResultGameMismatch because the
+// ticket's AppOwnership section names g_OriginalAppId while Steam's
+// internal active app is g_ForcedAppId (480).
+static EBeginAuthSessionResult S_CALLTYPE Hooked_BeginAuthSession(
+    void* pThis, const void* pAuthTicket, int cbAuthTicket, CSteamID steamID)
+{
+    if (g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
+        return g_pfnOriginalBeginAuthSession(pThis, pAuthTicket, cbAuthTicket, steamID);
+
+    UCOLOG("[UCOnline2] BeginAuthSession bypass: returning OK (cb=%d sid=%llu)",
+        cbAuthTicket, steamID.ConvertToUint64());
+    return k_EBeginAuthSessionResultOK;
+}
 
 static inline void TicketWriteU16(unsigned char*& p, uint16 v)
 {
@@ -1071,15 +1134,15 @@ void InstallGetAuthSessionTicketHook()
 
     void** vtable = *reinterpret_cast<void***>(g_ClientCtx.SteamUser());
 
-    // ISteamUser vtable index 13 = GetAuthSessionTicket
-    void* pOriginalFunc = vtable[13];
+    // ISteamUser vtable: [13]=GetAuthSessionTicket, [15]=BeginAuthSession
+    void* pGetTicketFn = vtable[13];
+    void* pBeginAuthFn = vtable[15];
 
-    MH_STATUS s = MH_CreateHook(pOriginalFunc, &Hooked_GetAuthSessionTicket,
+    MH_STATUS s = MH_CreateHook(pGetTicketFn, &Hooked_GetAuthSessionTicket,
         reinterpret_cast<void**>(&g_pfnOriginalGetAuthSessionTicket));
-
     if (s == MH_OK)
     {
-        s = MH_EnableHook(pOriginalFunc);
+        s = MH_EnableHook(pGetTicketFn);
         if (s == MH_OK)
             UCOLOG("[UCOnline2] GetAuthSessionTicket hook installed (FakeAppId=%u, RealAppId=%u)",
                 g_ForcedAppId, g_OriginalAppId);
@@ -1089,6 +1152,21 @@ void InstallGetAuthSessionTicketHook()
     else
     {
         UCOLOG("[UCOnline2] MH_CreateHook failed for GetAuthSessionTicket: %d", s);
+    }
+
+    s = MH_CreateHook(pBeginAuthFn, &Hooked_BeginAuthSession,
+        reinterpret_cast<void**>(&g_pfnOriginalBeginAuthSession));
+    if (s == MH_OK)
+    {
+        s = MH_EnableHook(pBeginAuthFn);
+        if (s == MH_OK)
+            UCOLOG("[UCOnline2] BeginAuthSession hook installed");
+        else
+            UCOLOG("[UCOnline2] MH_EnableHook failed for BeginAuthSession: %d", s);
+    }
+    else
+    {
+        UCOLOG("[UCOnline2] MH_CreateHook failed for BeginAuthSession: %d", s);
     }
 }
 
