@@ -478,6 +478,13 @@ static Fn_PhotonAppSettings_get_Global g_pfnOrigPhotonAppSettingsGetGlobal = nul
 typedef void (__fastcall *Fn_AuthValues_set_AuthType)(void* pThis, unsigned int value);
 static Fn_AuthValues_set_AuthType g_pfnOrigAuthValuesSetAuthType = nullptr;
 
+// AuthenticationValues.set_Token(object value)
+// Originally the Steam ticket bytes. Force null so Photon
+// can't interpret AuthType=255-with-token as "client wants
+// custom auth".
+typedef void (__fastcall *Fn_AuthValues_set_Token)(void* pThis, void* value);
+static Fn_AuthValues_set_Token g_pfnOrigAuthValuesSetToken = nullptr;
+
 // Our replacement GUID for Fusion AppId, read from the ini.
 // Stored as the managed System.String pointer (created lazily on
 // first hook fire after IL2CPP runtime is ready).
@@ -550,6 +557,13 @@ static void __fastcall Hooked_AuthValues_set_AuthType(void* pThis, unsigned int 
     if (value != 255)
         LOG("[Outbound] AuthenticationValues.set_AuthType(%u) -> forced 255 (None)", value);
     g_pfnOrigAuthValuesSetAuthType(pThis, 255);
+}
+
+static void __fastcall Hooked_AuthValues_set_Token(void* pThis, void* value)
+{
+    if (value)
+        LOG("[Outbound] AuthenticationValues.set_Token(%p) -> forced null", value);
+    g_pfnOrigAuthValuesSetToken(pThis, nullptr);
 }
 
 static void* __fastcall Hooked_PhotonAppSettings_get_Global()
@@ -712,6 +726,13 @@ static void TryInstallIl2CppHooks()
             (void*)&Hooked_AuthValues_set_AuthType,
             (void**)&g_pfnOrigAuthValuesSetAuthType,
             "AuthenticationValues.set_AuthType");
+
+        InstallIl2CppHook(
+            "Fusion.Realtime", "Fusion.Photon.Realtime", "AuthenticationValues",
+            "set_Token", 1,
+            (void*)&Hooked_AuthValues_set_Token,
+            (void**)&g_pfnOrigAuthValuesSetToken,
+            "AuthenticationValues.set_Token");
     }
 }
 
