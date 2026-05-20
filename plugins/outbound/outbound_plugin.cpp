@@ -36,6 +36,8 @@
 #include "../../include/MinHook.h"
 #include "../../include/uco_plugin.h"
 
+#include "il2cpp_runtime.h"
+
 // ============================================================
 // Plugin-local state -- populated in UCO_PluginInit
 // ============================================================
@@ -48,6 +50,18 @@ static HANDLE    g_hEosWatcherThread = nullptr;
 static volatile LONG g_bShutdown     = 0;
 
 #define LOG(...) do { if (g_Log) g_Log(__VA_ARGS__); } while (0)
+
+// Visible to il2cpp_runtime.cpp via extern "C" prototype.
+extern "C" void IL2CPP_Log(const char* fmt, ...)
+{
+    if (!g_Log) return;
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, ap);
+    va_end(ap);
+    g_Log("%s", buf);
+}
 
 // ============================================================
 // Synthetic Steam auth ticket builder
@@ -321,15 +335,46 @@ static bool TryInstallEosHooks()
     return any;
 }
 
-static DWORD WINAPI EosWatcherProc(LPVOID)
+// Stub for the actual game-method hooks. Filled in once we
+// identify the target method via Il2CppDumper. See README in
+// plugins/outbound/.
+static void TryInstallIl2CppHooks()
 {
-    for (int i = 0; i < 300 && InterlockedCompareExchange(&g_bShutdown, 0, 0) == 0; ++i)
+    if (!IL2CPP_IsReady()) return;
+    static bool attempted = false;
+    if (attempted) return;
+    attempted = true;
+
+    LOG("[Outbound] IL2CPP ready -- placeholder for game-method hooks");
+    // TODO: once Il2CppDumper reveals the target method, add:
+    //   void* fn = IL2CPP_FindMethodPtr("Assembly-CSharp", "Namespace",
+    //                                    "Class", "Method", argCount);
+    //   if (fn) {
+    //       MH_CreateHook(fn, &Hooked_TargetMethod, &g_pfnOrigTargetMethod);
+    //       MH_EnableHook(fn);
+    //   }
+}
+
+static DWORD WINAPI WatcherProc(LPVOID)
+{
+    bool eosDone = false;
+    bool il2Done = false;
+    for (int i = 0; i < 600 && InterlockedCompareExchange(&g_bShutdown, 0, 0) == 0; ++i)
     {
-        if (TryInstallEosHooks()) return 0;
+        if (!eosDone) eosDone = TryInstallEosHooks();
+        if (!il2Done && IL2CPP_TryInit())
+        {
+            il2Done = true;
+            TryInstallIl2CppHooks();
+        }
+        if (eosDone && il2Done) return 0;
         Sleep(200);
     }
     if (!InterlockedCompareExchange(&g_bShutdown, 0, 0))
-        LOG("[Outbound] EOSSDK never loaded -- giving up on EOS hooks");
+    {
+        if (!eosDone) LOG("[Outbound] EOSSDK never loaded -- giving up on EOS hooks");
+        if (!il2Done) LOG("[Outbound] GameAssembly.dll never resolved -- giving up on IL2CPP hooks");
+    }
     return 0;
 }
 
@@ -398,9 +443,10 @@ extern "C" __declspec(dllexport) int __cdecl UCO_PluginInit(const UCO_PluginCont
         ctx->RegisterCallbackPatcher(143, &PatchValidateAuthTicketResponse);
     }
 
-    // EOSSDK loads later via Unity's plugin loader -- spin a brief
-    // watcher (max ~60s) to install EOS hooks the moment it appears.
-    g_hEosWatcherThread = CreateThread(nullptr, 0, EosWatcherProc,
+    // EOSSDK and GameAssembly.dll both load later during Unity
+    // plugin init -- spin a watcher (max ~120s) that installs each
+    // hook set the moment its target module appears.
+    g_hEosWatcherThread = CreateThread(nullptr, 0, WatcherProc,
                                         nullptr, 0, nullptr);
     return 0;
 }
