@@ -521,21 +521,50 @@ static void TryInstallIl2CppHooks()
         "Fusion.CloudServices.OnCustomAuthenticationFailed");
 
     // Fusion fan-outs to game-attached delegates / UnityEvents.
-    // Suppressing both prevents the game from observing the
-    // failure dictionary that triggers its error UI.
-    InstallIl2CppHook(
-        "Fusion.Runtime", "Fusion", "NetworkDelegates",
-        "OnCustomAuthenticationResponse", 2,
-        (void*)&Hooked_NetworkDelegatesOnCustomAuthResponse,
-        (void**)&g_pfnOrigNetworkDelegatesOnCustomAuthResponse,
-        "Fusion.NetworkDelegates.OnCustomAuthenticationResponse");
+    // These are explicit interface implementations: in IL2CPP
+    // metadata they appear with the full prefixed name, not the
+    // bare method name. Try both forms.
+    if (!InstallIl2CppHook(
+            "Fusion.Runtime", "Fusion", "NetworkDelegates",
+            "Fusion.INetworkRunnerCallbacks.OnCustomAuthenticationResponse", 2,
+            (void*)&Hooked_NetworkDelegatesOnCustomAuthResponse,
+            (void**)&g_pfnOrigNetworkDelegatesOnCustomAuthResponse,
+            "Fusion.NetworkDelegates.OnCustomAuthenticationResponse"))
+    {
+        // Fall back to short name in case the metadata stores it that way.
+        InstallIl2CppHook(
+            "Fusion.Runtime", "Fusion", "NetworkDelegates",
+            "OnCustomAuthenticationResponse", 2,
+            (void*)&Hooked_NetworkDelegatesOnCustomAuthResponse,
+            (void**)&g_pfnOrigNetworkDelegatesOnCustomAuthResponse,
+            "Fusion.NetworkDelegates.OnCustomAuthenticationResponse (short)");
+    }
 
+    if (!InstallIl2CppHook(
+            "Fusion.Runtime", "Fusion", "NetworkEvents",
+            "Fusion.INetworkRunnerCallbacks.OnCustomAuthenticationResponse", 2,
+            (void*)&Hooked_NetworkEventsOnCustomAuthResponse,
+            (void**)&g_pfnOrigNetworkEventsOnCustomAuthResponse,
+            "Fusion.NetworkEvents.OnCustomAuthenticationResponse"))
+    {
+        InstallIl2CppHook(
+            "Fusion.Runtime", "Fusion", "NetworkEvents",
+            "OnCustomAuthenticationResponse", 2,
+            (void*)&Hooked_NetworkEventsOnCustomAuthResponse,
+            (void**)&g_pfnOrigNetworkEventsOnCustomAuthResponse,
+            "Fusion.NetworkEvents.OnCustomAuthenticationResponse (short)");
+    }
+
+    // OperationHandler is the async TaskCompletionSource that
+    // turns the auth response into a Task result. Its
+    // OnCustomAuthenticationFailed sets a faulted state which
+    // some game code might be awaiting.
     InstallIl2CppHook(
-        "Fusion.Runtime", "Fusion", "NetworkEvents",
-        "OnCustomAuthenticationResponse", 2,
-        (void*)&Hooked_NetworkEventsOnCustomAuthResponse,
-        (void**)&g_pfnOrigNetworkEventsOnCustomAuthResponse,
-        "Fusion.NetworkEvents.OnCustomAuthenticationResponse");
+        "Fusion.Runtime", "Fusion.Photon.Realtime.Async", "OperationHandler",
+        "OnCustomAuthenticationFailed", 1,
+        (void*)&Hooked_OnCustomAuthenticationFailed,
+        (void**)&g_pfnOrigOnCustomAuthenticationFailed,
+        "Fusion.Photon.Realtime.Async.OperationHandler.OnCustomAuthenticationFailed");
 }
 
 static DWORD WINAPI WatcherProc(LPVOID)
