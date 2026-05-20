@@ -465,6 +465,10 @@ static Fn_OnCustomAuthenticationFailed   g_pfnOrigOnCustomAuthenticationFailed  
 static Fn_OnCustomAuthenticationResponse g_pfnOrigNetworkDelegatesOnCustomAuthResponse        = nullptr;
 static Fn_OnCustomAuthenticationResponse g_pfnOrigNetworkEventsOnCustomAuthResponse           = nullptr;
 
+// NetworkManager.OnShutdown(NetworkRunner, ShutdownReason)
+typedef void (__fastcall *Fn_NetworkManagerOnShutdown)(void* pThis, void* runner, int shutdownReason);
+static Fn_NetworkManagerOnShutdown g_pfnOrigNetworkManagerOnShutdown = nullptr;
+
 static void __fastcall Hooked_OnCustomAuthenticationFailed(void* pThis, void* debugMessage)
 {
     LOG("[Outbound] Fusion.CloudServices.OnCustomAuthenticationFailed suppressed");
@@ -483,6 +487,20 @@ static void __fastcall Hooked_NetworkDelegatesOnCustomAuthResponse(void* pThis, 
 static void __fastcall Hooked_NetworkEventsOnCustomAuthResponse(void* pThis, void* runner, void* data)
 {
     LOG("[Outbound] Fusion.NetworkEvents.OnCustomAuthenticationResponse suppressed");
+}
+
+// NetworkManager (Assembly-CSharp, global namespace) is the
+// game's own INetworkRunnerCallbacks implementation. When
+// Photon Fusion's master rejects custom auth, the runner
+// shuts down with ShutdownReason.IncompatibleConfiguration
+// (= 2) -- which matches the "Failed(2)" prefix in the UI.
+// This is the method that actually formats and displays the
+// error. Suppress it.
+static void __fastcall Hooked_NetworkManagerOnShutdown(void* pThis, void* runner, int shutdownReason)
+{
+    LOG("[Outbound] NetworkManager.OnShutdown(reason=%d) suppressed", shutdownReason);
+    // Do not call original: the original would display
+    // "Failed(reason): '<debug message>'" to the user.
 }
 
 static bool InstallIl2CppHook(const char* image, const char* ns, const char* klass,
@@ -555,16 +573,17 @@ static void TryInstallIl2CppHooks()
             "Fusion.NetworkEvents.OnCustomAuthenticationResponse (short)");
     }
 
-    // OperationHandler is the async TaskCompletionSource that
-    // turns the auth response into a Task result. Its
-    // OnCustomAuthenticationFailed sets a faulted state which
-    // some game code might be awaiting.
+    // The big one: NetworkManager.OnShutdown in Assembly-CSharp.
+    // Photon Fusion's auth rejection converts to a runner
+    // shutdown with ShutdownReason.IncompatibleConfiguration (=2),
+    // which is the "Failed(2)" prefix in the UI. This is where
+    // the game formats and displays the error.
     InstallIl2CppHook(
-        "Fusion.Runtime", "Fusion.Photon.Realtime.Async", "OperationHandler",
-        "OnCustomAuthenticationFailed", 1,
-        (void*)&Hooked_OnCustomAuthenticationFailed,
-        (void**)&g_pfnOrigOnCustomAuthenticationFailed,
-        "Fusion.Photon.Realtime.Async.OperationHandler.OnCustomAuthenticationFailed");
+        "Assembly-CSharp", "", "NetworkManager",
+        "OnShutdown", 2,
+        (void*)&Hooked_NetworkManagerOnShutdown,
+        (void**)&g_pfnOrigNetworkManagerOnShutdown,
+        "NetworkManager.OnShutdown");
 }
 
 static DWORD WINAPI WatcherProc(LPVOID)
