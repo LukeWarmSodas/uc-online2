@@ -950,9 +950,9 @@ static DWORD WINAPI SteamStub_HookGetTickCount(void)
 // ============================================================
 // GetAuthSessionTicket Hook
 //
-// Builds a fully synthetic Steam auth ticket with RealAppId
-// (g_OriginalAppId, from `ogAppId` ini) embedded in the
-// AppOwnershipTicket. We still call the original first so Steam
+// Builds a fully synthetic Steam auth ticket with the ogAppId
+// (g_OriginalAppId, from the `ogAppId` ini key) embedded in
+// the AppOwnershipTicket. We still call the original first so Steam
 // fires the GetAuthSessionTicketResponse_t callback the game
 // is waiting on; then we overwrite the buffer with the
 // synthetic ticket. Signature is left zeroed -- the matching
@@ -1144,7 +1144,7 @@ void InstallGetAuthSessionTicketHook()
     {
         s = MH_EnableHook(pGetTicketFn);
         if (s == MH_OK)
-            UCOLOG("[UCOnline2] GetAuthSessionTicket hook installed (FakeAppId=%u, RealAppId=%u)",
+            UCOLOG("[UCOnline2] GetAuthSessionTicket hook installed (AppId=%u, ogAppId=%u)",
                 g_ForcedAppId, g_OriginalAppId);
         else
             UCOLOG("[UCOnline2] MH_EnableHook failed for GetAuthSessionTicket: %d", s);
