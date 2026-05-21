@@ -506,6 +506,21 @@ static Fn_FRC_ConnectUsingSettings g_pfnOrigFRCconnectUsingSettings = nullptr;
 // the same offset applies on any FusionAppSettings instance.
 static const size_t kOffsetAppSettings_AppIdFusion = 0x18;
 
+// NetworkRunner.StartGame(StartGameArgs args) -- THE entry point
+// for Photon Fusion connections. StartGameArgs is a struct
+// passed by hidden pointer on x64 ABI. Layout per dump:
+//   StartGameArgs.AuthValues               @ 0x100 (managed ptr)
+//   StartGameArgs.CustomPhotonAppSettings  @ 0x108 (managed ptr to FusionAppSettings)
+// If the game sets CustomPhotonAppSettings, Photon uses THAT
+// instead of PhotonAppSettings.Global -- which is why the
+// PhotonAppSettings.Global patch never reaches the actual
+// connection. We rewrite the CustomPhotonAppSettings'
+// AppIdFusion field here.
+typedef void* (__fastcall *Fn_NetworkRunner_StartGame)(void* pThis, void* args);
+static Fn_NetworkRunner_StartGame g_pfnOrigNetworkRunnerStartGame = nullptr;
+
+static const size_t kOffsetStartGameArgs_CustomPhotonAppSettings = 0x108;
+
 // Our replacement GUID for Fusion AppId, read from the ini.
 // Stored as the managed System.String pointer (created lazily on
 // first hook fire after IL2CPP runtime is ready).
@@ -626,6 +641,34 @@ static void __fastcall Hooked_LBC_set_AppId(void* pThis, void* value)
         LOG("[Outbound] LoadBalancingClient.set_AppId(%p) -> passthrough (our string not ready yet)", value);
         g_pfnOrigLBCsetAppId(pThis, value);
     }
+}
+
+// THE entry point. NetworkRunner.StartGame receives the
+// game's StartGameArgs which can carry CustomPhotonAppSettings
+// -- a per-call AppSettings override that wins over the
+// global PhotonAppSettings singleton. We rewrite its
+// AppIdFusion field in place so the connection actually
+// targets our Photon app.
+static void* __fastcall Hooked_NetworkRunner_StartGame(void* pThis, void* args)
+{
+    if (args && g_OurFusionAppIdString)
+    {
+        void** pCustom = (void**)((char*)args + kOffsetStartGameArgs_CustomPhotonAppSettings);
+        void* custom = *pCustom;
+        if (custom)
+        {
+            void** pAppIdFusion = (void**)((char*)custom + kOffsetAppSettings_AppIdFusion);
+            void* oldStr = *pAppIdFusion;
+            *pAppIdFusion = g_OurFusionAppIdString;
+            LOG("[Outbound] StartGame: rewrote CustomPhotonAppSettings.AppIdFusion (was %p) -> %p",
+                oldStr, g_OurFusionAppIdString);
+        }
+        else
+        {
+            LOG("[Outbound] StartGame: CustomPhotonAppSettings is null (game falls back to global -- already patched)");
+        }
+    }
+    return g_pfnOrigNetworkRunnerStartGame(pThis, args);
 }
 
 // The big one: intercept the actual Fusion connection call.
@@ -838,6 +881,16 @@ static void TryInstallIl2CppHooks()
             (void*)&Hooked_FRC_ConnectUsingSettings,
             (void**)&g_pfnOrigFRCconnectUsingSettings,
             "FusionRelayClient.ConnectUsingSettings");
+
+        // The actual entry point Outbound uses. Patches the
+        // per-call CustomPhotonAppSettings override carried in
+        // StartGameArgs.
+        InstallIl2CppHook(
+            "Fusion.Runtime", "Fusion", "NetworkRunner",
+            "StartGame", 1,
+            (void*)&Hooked_NetworkRunner_StartGame,
+            (void**)&g_pfnOrigNetworkRunnerStartGame,
+            "NetworkRunner.StartGame");
     }
 }
 
