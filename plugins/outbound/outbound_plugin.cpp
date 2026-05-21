@@ -493,6 +493,19 @@ static Fn_AuthValues_set_Token g_pfnOrigAuthValuesSetToken = nullptr;
 typedef void (__fastcall *Fn_LBC_set_AppId)(void* pThis, void* value);
 static Fn_LBC_set_AppId g_pfnOrigLBCsetAppId = nullptr;
 
+// FusionRelayClient.ConnectUsingSettings(AppSettings appSettings)
+// This is the actual entry point Fusion uses to start a Photon
+// connection. The AppSettings is passed by reference; if we
+// rewrite its AppIdFusion field on the way in, the connection
+// goes to our app. Most reliable hook target.
+typedef bool (__fastcall *Fn_FRC_ConnectUsingSettings)(void* pThis, void* appSettings);
+static Fn_FRC_ConnectUsingSettings g_pfnOrigFRCconnectUsingSettings = nullptr;
+
+// Field offset of AppIdFusion on AppSettings base class (per dump
+// line 1034518). FusionAppSettings inherits from AppSettings, so
+// the same offset applies on any FusionAppSettings instance.
+static const size_t kOffsetAppSettings_AppIdFusion = 0x18;
+
 // Our replacement GUID for Fusion AppId, read from the ini.
 // Stored as the managed System.String pointer (created lazily on
 // first hook fire after IL2CPP runtime is ready).
@@ -613,6 +626,27 @@ static void __fastcall Hooked_LBC_set_AppId(void* pThis, void* value)
         LOG("[Outbound] LoadBalancingClient.set_AppId(%p) -> passthrough (our string not ready yet)", value);
         g_pfnOrigLBCsetAppId(pThis, value);
     }
+}
+
+// The big one: intercept the actual Fusion connection call.
+// Mutates the passed AppSettings object's AppIdFusion field
+// in-place before forwarding to the original implementation.
+static bool __fastcall Hooked_FRC_ConnectUsingSettings(void* pThis, void* appSettings)
+{
+    if (appSettings && g_OurFusionAppIdString)
+    {
+        void** pAppIdFusion = (void**)((char*)appSettings + kOffsetAppSettings_AppIdFusion);
+        void* oldStr = *pAppIdFusion;
+        *pAppIdFusion = g_OurFusionAppIdString;
+        LOG("[Outbound] ConnectUsingSettings: rewrote AppIdFusion (was %p) -> %p",
+            oldStr, g_OurFusionAppIdString);
+    }
+    else
+    {
+        LOG("[Outbound] ConnectUsingSettings called (settings=%p, ourStr=%p) -- no patch applied",
+            appSettings, g_OurFusionAppIdString);
+    }
+    return g_pfnOrigFRCconnectUsingSettings(pThis, appSettings);
 }
 
 static void* __fastcall Hooked_PhotonAppSettings_get_Global()
@@ -793,6 +827,17 @@ static void TryInstallIl2CppHooks()
             (void*)&Hooked_LBC_set_AppId,
             (void**)&g_pfnOrigLBCsetAppId,
             "LoadBalancingClient.set_AppId");
+
+        // The most reliable target: FusionRelayClient.ConnectUsingSettings.
+        // Takes the AppSettings object that drives the actual Photon
+        // connection. We mutate AppIdFusion in-place before calling
+        // original.
+        InstallIl2CppHook(
+            "Fusion.Realtime", "Fusion.Photon.Realtime", "FusionRelayClient",
+            "ConnectUsingSettings", 1,
+            (void*)&Hooked_FRC_ConnectUsingSettings,
+            (void**)&g_pfnOrigFRCconnectUsingSettings,
+            "FusionRelayClient.ConnectUsingSettings");
     }
 }
 
