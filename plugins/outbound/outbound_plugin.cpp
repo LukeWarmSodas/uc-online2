@@ -521,6 +521,27 @@ static Fn_NetworkRunner_StartGame g_pfnOrigNetworkRunnerStartGame = nullptr;
 
 static const size_t kOffsetStartGameArgs_CustomPhotonAppSettings = 0x108;
 
+// LoadBalancingClient.OpAuthenticate(appId, appVersion, authValues,
+//                                     regionCode, getLobbyStatistics)
+// RVA 0xF04DC0. THIS is the actual wire-send call -- whatever
+// authValues.authType field holds at the moment this fires is
+// what reaches Photon's master server. Patching here bypasses
+// IL2CPP inlining concerns.
+//
+// AuthenticationValues field layout (per dump):
+//   authType field @ offset 0x10 (byte, but stored in an aligned slot)
+typedef bool (__fastcall *Fn_OpAuthenticate)(
+    void* pThis, void* appId, void* appVersion, void* authValues,
+    void* regionCode, bool getLobbyStatistics);
+static Fn_OpAuthenticate g_pfnOrigOpAuthenticate = nullptr;
+
+typedef bool (__fastcall *Fn_OpAuthenticateOnce)(
+    void* pThis, void* appId, void* appVersion, void* authValues,
+    void* regionCode, int encryptionMode, int expectedProtocol);
+static Fn_OpAuthenticateOnce g_pfnOrigOpAuthenticateOnce = nullptr;
+
+static const size_t kOffsetAuthValues_authType = 0x10;
+
 // Our replacement GUID for Fusion AppId, read from the ini.
 // Stored as the managed System.String pointer (created lazily on
 // first hook fire after IL2CPP runtime is ready).
@@ -595,15 +616,15 @@ static volatile LONG g_TriedForceGlobal = 0;
 // the AppId patch on the cached singleton.
 static void* __fastcall Hooked_PhotonAppSettings_get_Global();
 
+// CustomAuthenticationType values (byte enum):
+//   Custom = 0, Steam = 1, Facebook = 2, ..., None = 255
+// Read from union-crax.ini so users can pick what their Photon
+// app expects without rebuilding. Default 0 (Custom) routes
+// the auth through a Photon Custom Auth URL.
+static unsigned int g_ForcedAuthType = 0;
+
 static void __fastcall Hooked_AuthValues_set_AuthType(void* pThis, unsigned int value)
 {
-    // The game caches PhotonAppSettings before our hook installs, so
-    // get_Global is never naturally called after that. The first
-    // set_AuthType call is guaranteed to be on Unity's main thread
-    // (this is where managed objects are being constructed during
-    // the multiplayer/lobby init), so use it as a safe trampoline
-    // to invoke our get_Global hook -- which patches the cached
-    // PhotonAppSettings.AppIdFusion field for the FIRST time.
     if (g_AppIdPatchEnabled
         && InterlockedExchange(&g_TriedForceGlobal, 1) == 0
         && g_pfnOrigPhotonAppSettingsGetGlobal != nullptr)
@@ -612,9 +633,12 @@ static void __fastcall Hooked_AuthValues_set_AuthType(void* pThis, unsigned int 
         Hooked_PhotonAppSettings_get_Global();
     }
 
-    if (value != 255)
-        LOG("[Outbound] AuthenticationValues.set_AuthType(%u) -> forced 255 (None)", value);
-    g_pfnOrigAuthValuesSetAuthType(pThis, 255);
+    // We still hook the setter for completeness, but IL2CPP may
+    // inline the game's own assignment past this hook. The real
+    // override happens in Hooked_OpAuthenticate below.
+    if (value != g_ForcedAuthType)
+        LOG("[Outbound] AuthenticationValues.set_AuthType(%u) -> forced %u", value, g_ForcedAuthType);
+    g_pfnOrigAuthValuesSetAuthType(pThis, g_ForcedAuthType);
 }
 
 static void __fastcall Hooked_AuthValues_set_Token(void* pThis, void* value)
@@ -641,6 +665,36 @@ static void __fastcall Hooked_LBC_set_AppId(void* pThis, void* value)
         LOG("[Outbound] LoadBalancingClient.set_AppId(%p) -> passthrough (our string not ready yet)", value);
         g_pfnOrigLBCsetAppId(pThis, value);
     }
+}
+
+// Override the wire-time auth type. We write the byte at
+// offset 0x10 on the AuthValues object directly, so IL2CPP-
+// inlined assignments earlier can't undo us.
+static void PatchAuthValuesAuthType(void* authValues, const char* sender)
+{
+    if (!authValues) return;
+    unsigned char* pAuthTypeByte = (unsigned char*)authValues + kOffsetAuthValues_authType;
+    unsigned char prev = *pAuthTypeByte;
+    *pAuthTypeByte = (unsigned char)(g_ForcedAuthType & 0xFF);
+    LOG("[Outbound] %s: authValues.authType %u -> %u", sender, prev, g_ForcedAuthType);
+}
+
+static bool __fastcall Hooked_OpAuthenticate(
+    void* pThis, void* appId, void* appVersion, void* authValues,
+    void* regionCode, bool getLobbyStatistics)
+{
+    PatchAuthValuesAuthType(authValues, "OpAuthenticate");
+    return g_pfnOrigOpAuthenticate(pThis, appId, appVersion, authValues,
+                                    regionCode, getLobbyStatistics);
+}
+
+static bool __fastcall Hooked_OpAuthenticateOnce(
+    void* pThis, void* appId, void* appVersion, void* authValues,
+    void* regionCode, int encryptionMode, int expectedProtocol)
+{
+    PatchAuthValuesAuthType(authValues, "OpAuthenticateOnce");
+    return g_pfnOrigOpAuthenticateOnce(pThis, appId, appVersion, authValues,
+                                        regionCode, encryptionMode, expectedProtocol);
 }
 
 // THE entry point. NetworkRunner.StartGame receives the
@@ -902,6 +956,25 @@ static void TryInstallIl2CppHooks()
             (void*)&Hooked_NetworkRunner_StartGame,
             (void**)&g_pfnOrigNetworkRunnerStartGame,
             "NetworkRunner.StartGame");
+
+        // THE actual wire-time override. Photon's OpAuthenticate
+        // is what sends the auth op to the master server; we
+        // rewrite authValues.authType byte just before it goes
+        // out. Catches any AuthType inlining the C# compiler
+        // did at game-side assignment sites.
+        InstallIl2CppHook(
+            "Fusion.Realtime", "Fusion.Photon.Realtime", "LoadBalancingClient",
+            "OpAuthenticate", 5,
+            (void*)&Hooked_OpAuthenticate,
+            (void**)&g_pfnOrigOpAuthenticate,
+            "LoadBalancingClient.OpAuthenticate");
+
+        InstallIl2CppHook(
+            "Fusion.Realtime", "Fusion.Photon.Realtime", "LoadBalancingClient",
+            "OpAuthenticateOnce", 6,
+            (void*)&Hooked_OpAuthenticateOnce,
+            (void**)&g_pfnOrigOpAuthenticateOnce,
+            "LoadBalancingClient.OpAuthenticateOnce");
     }
 }
 
@@ -990,6 +1063,15 @@ extern "C" __declspec(dllexport) int __cdecl UCO_PluginInit(const UCO_PluginCont
         {
             LOG("[Outbound] no [Outbound]PhotonAppIdFusion in ini -- AppId patch disabled");
         }
+
+        // Optional AuthType override; defaults to 0 (Custom).
+        // Set to 255 for None (anonymous), 1 for Steam, etc.
+        char authTypeBuf[8] = {};
+        GetPrivateProfileStringA("Outbound", "ForcedAuthType", "0",
+                                 authTypeBuf, sizeof(authTypeBuf), ini);
+        unsigned int parsed = (unsigned int)strtoul(authTypeBuf, nullptr, 10);
+        if (parsed <= 255) g_ForcedAuthType = parsed;
+        LOG("[Outbound] forced AuthType = %u", g_ForcedAuthType);
     }
 
     if (g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
