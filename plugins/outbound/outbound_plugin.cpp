@@ -962,16 +962,20 @@ static void TryInstallIl2CppHooks()
         // rewrite authValues.authType byte just before it goes
         // out. Catches any AuthType inlining the C# compiler
         // did at game-side assignment sites.
+        //
+        // argCount = -1 disables the parameter-count filter --
+        // some IL2CPP versions count `this` or count optional
+        // params differently, so use match-any.
         InstallIl2CppHook(
             "Fusion.Realtime", "Fusion.Photon.Realtime", "LoadBalancingClient",
-            "OpAuthenticate", 5,
+            "OpAuthenticate", -1,
             (void*)&Hooked_OpAuthenticate,
             (void**)&g_pfnOrigOpAuthenticate,
             "LoadBalancingClient.OpAuthenticate");
 
         InstallIl2CppHook(
             "Fusion.Realtime", "Fusion.Photon.Realtime", "LoadBalancingClient",
-            "OpAuthenticateOnce", 6,
+            "OpAuthenticateOnce", -1,
             (void*)&Hooked_OpAuthenticateOnce,
             (void**)&g_pfnOrigOpAuthenticateOnce,
             "LoadBalancingClient.OpAuthenticateOnce");
