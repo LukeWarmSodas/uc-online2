@@ -966,19 +966,22 @@ static void TryInstallIl2CppHooks()
         // argCount = -1 disables the parameter-count filter --
         // some IL2CPP versions count `this` or count optional
         // params differently, so use match-any.
+        // OpAuthenticate lives on LoadBalancingPeer (the low-level
+        // Photon protocol peer that LoadBalancingClient uses
+        // internally), NOT on LoadBalancingClient.
         InstallIl2CppHook(
-            "Fusion.Realtime", "Fusion.Photon.Realtime", "LoadBalancingClient",
+            "Fusion.Realtime", "Fusion.Photon.Realtime", "LoadBalancingPeer",
             "OpAuthenticate", -1,
             (void*)&Hooked_OpAuthenticate,
             (void**)&g_pfnOrigOpAuthenticate,
-            "LoadBalancingClient.OpAuthenticate");
+            "LoadBalancingPeer.OpAuthenticate");
 
         InstallIl2CppHook(
-            "Fusion.Realtime", "Fusion.Photon.Realtime", "LoadBalancingClient",
+            "Fusion.Realtime", "Fusion.Photon.Realtime", "LoadBalancingPeer",
             "OpAuthenticateOnce", -1,
             (void*)&Hooked_OpAuthenticateOnce,
             (void**)&g_pfnOrigOpAuthenticateOnce,
-            "LoadBalancingClient.OpAuthenticateOnce");
+            "LoadBalancingPeer.OpAuthenticateOnce");
     }
 }
 
