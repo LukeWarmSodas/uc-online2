@@ -1,106 +1,139 @@
 # Outbound plugin
 
-Reference UCOnline2 plugin (see `include/uco_plugin.h`) demonstrating two patching strategies that this kind of EOS-gated game needs:
+Reference UCOnline2 plugin that gets Outbound's "Show Multiplayer Code" feature working when you don't own the game on Steam. It's also a worked example of the general technique for any Unity game built on Photon Fusion 2 that gates multiplayer behind Steam-backed custom authentication.
 
-1. **Steam-side hooks**: synthesize a Steam ticket with `ogAppId` embedded, bypass `BeginAuthSession`, force auth callbacks to OK. Lives in `outbound_plugin.cpp`.
-2. **EOS-side hooks**: intercept `EOS_Connect_Login` / `EOS_Auth_Login` and short-circuit them to success. Lives in `outbound_plugin.cpp`.
-3. **IL2CPP runtime patching**: resolve specific C# methods in `GameAssembly.dll` by name and replace their compiled bodies. Reusable runtime resolver in `il2cpp_runtime.{h,cpp}`.
+The TL;DR is:
 
-Layers 1 and 2 we have done already and they install cleanly. They are NOT what makes the multiplayer flow work for this game — confirmed by the fact that even with both layers active, "Failed(2): Ticket for other app" still appears. The validation that produces that error lives in Outbound's own compiled C# code, which is what layer 3 targets. OnlineFix's per-game `Custom.dll` does exactly the same thing (we confirmed by tracing its dynamic API resolution — it pulls in the `il2cpp_*` family of functions, not any Steam or EOS functions).
+1. Stand up your own Photon Fusion Cloud app.
+2. Redirect Outbound to use your app's GUID instead of the developer's.
+3. Use a permissive auth backend (a free Cloudflare Worker) so Photon doesn't try to validate Steam tickets we can't sign properly.
 
-## Finding the method to hook
+You and any friend who follows the same setup with the **same Photon GUID** will be on the same Photon cluster and can host / join each other's sessions.
 
-Custom.dll's exact byte-level patch into Outbound is unknown to us, but the IL2CPP API gives us a name-based lookup that is resilient across game updates. The workflow:
+## Setup walkthrough
 
-1. Download **Il2CppDumper** from <https://github.com/Perfare/Il2CppDumper>.
-2. Run it against this install:
+### 1. Create your Photon Fusion 2 app
+
+1. Sign up at <https://dashboard.photonengine.com/> (free, no card).
+2. Click **Create a new app** → type **Fusion** → name it anything (e.g. `outbound-friends`).
+3. Copy the **AppId** GUID it gives you, e.g. `4ff936cd-afb9-486b-b8e3-6ab23d915af0`.
+
+### 2. Create a permissive auth backend
+
+The game sends an `AuthType=Steam` ticket on connect. Photon will try to validate it via Steam Web API — which fails because we don't have Outbound's publisher key. The easiest fix is to point Photon at a **Custom Authentication URL** you own that just always replies success.
+
+A Cloudflare Worker is the easiest way:
+
+1. <https://workers.cloudflare.com> → sign up (free).
+2. **Workers & Pages → Create application → Create Worker → Deploy**.
+3. Click **Edit code** and paste:
+
+   ```js
+   export default {
+     async fetch() {
+       return new Response(JSON.stringify({
+         ResultCode: 1,
+         UserId: "anon-" + crypto.randomUUID(),
+         Nickname: "Player"
+       }), { headers: { "Content-Type": "application/json" } });
+     }
+   };
    ```
-   Il2CppDumper.exe \
-     "<game>\GameAssembly.dll" \
-     "<game>\Outbound_Data\il2cpp_data\Metadata\global-metadata.dat" \
-     dump_out
-   ```
-3. Open `dump_out/dump.cs`. This file contains every C# class and method in Outbound, with their original names.
-4. Find the multiplayer / ticket-validation method. Likely keywords to grep:
-   - `"Failed(0)"`, `"Failed({0})"` — the format string
-   - `"Ticket"`, `"MultiplayerCode"`, `"JoinCode"`, `"SteamMatchmaking"`, `"AuthTicket"`
-   - The class is probably named something like `SteamMultiplayerManager`, `LobbyConnection`, `MultiplayerAuth`.
-5. Note its fully qualified path: assembly image (usually `Assembly-CSharp`), namespace, class name, method name, and arg count.
 
-## Adding the hook
+4. **Deploy** and copy the resulting URL (e.g. `https://outbound-auth.<your-handle>.workers.dev`).
 
-Once the target method is identified, edit `outbound_plugin.cpp` → `TryInstallIl2CppHooks()`:
+### 3. Wire the Worker into Photon
 
-```cpp
-typedef bool (__fastcall *Fn_ValidateTicket)(void* pThis, void* ticket);
-static Fn_ValidateTicket g_pfnOrigValidateTicket = nullptr;
+In Photon dashboard for your app:
 
-static bool __fastcall Hooked_ValidateTicket(void* pThis, void* ticket)
-{
-    LOG("[Outbound] ValidateTicket bypass -> returning true");
-    return true;  // or call original then mutate result
-}
+1. **Manage → Authentication**.
+2. Remove any existing Steam provider.
+3. **Add Provider → Custom**.
+4. Paste the Worker URL into the **Authentication URL** field.
+5. Leave the mandatory key/value pairs empty.
+6. **Reject Clients on Authentication Failure: UNCHECKED**.
+7. Save.
 
-static void TryInstallIl2CppHooks()
-{
-    if (!IL2CPP_IsReady()) return;
-    static bool done = false;
-    if (done) return;
+### 4. Static-edit Outbound's bundled AppId
 
-    void* target = IL2CPP_FindMethodPtr(
-        "Assembly-CSharp", "Outbound.Multiplayer",
-        "SteamMultiplayerManager", "ValidateTicket", 1);
-    if (!target) return;
+Run the included PowerShell script (from this `plugins/outbound/` folder):
 
-    MH_CreateHook(target, &Hooked_ValidateTicket,
-                  (void**)&g_pfnOrigValidateTicket);
-    MH_EnableHook(target);
-    LOG("[Outbound] ValidateTicket hook installed at %p", target);
-    done = true;
-}
+```powershell
+.\Set-OutboundPhotonAppId.ps1 `
+  -GameDir 'C:\Users\YOU\Downloads\Outbound' `
+  -NewAppId '4ff936cd-afb9-486b-b8e3-6ab23d915af0'
 ```
 
-The signature (`__fastcall`, params, return type) must match what IL2CPP generated for that method. Il2CppDumper's output shows the C# signature; the native calling convention on Windows x64 is always Microsoft x64 (`__fastcall` in MSVC speak), but instance methods take `this` as the first argument.
+It backs up `Outbound_Data\resources.assets` to `resources.assets.bak`, then replaces the developer's embedded Photon AppId GUID (`cffbe809-5036-43d8-84a1-7bf16c924721`) with yours in place.
 
-## Build
+If Outbound updates and the GUID-replacement no longer applies, the script will tell you — at that point the stock GUID has changed and the script needs updating.
+
+To roll back: `.\Set-OutboundPhotonAppId.ps1 -GameDir '...' -Revert`.
+
+### 5. Configure UCOnline2's ini
+
+`union-crax.ini` next to `Outbound.exe`:
+
+```ini
+[Settings]
+AppId=480
+ogAppId=2681030
+PluginsFolder=plugins
+GetStubbedLol=false
+
+[Outbound]
+PhotonAppIdFusion=4ff936cd-afb9-486b-b8e3-6ab23d915af0
+ForcedAuthType=0
+```
+
+- `PhotonAppIdFusion` — same GUID as the static edit. The plugin uses this as defense-in-depth in case the static edit isn't applied.
+- `ForcedAuthType=0` — `Custom` (matches the Custom Auth URL provider you set up in step 3). Use `255` for `None` if you want pure anonymous instead.
+
+### 6. Build and drop in the plugin
 
 ```powershell
 msbuild plugins\outbound\outbound_plugin.vcxproj `
   -p:Configuration=Release -p:Platform=x64 -m
 ```
 
-Output: `plugins\outbound\relbuild\x64\outbound.dll`. Drop into `<game>\plugins\outbound.dll`.
+Copy the result into the game:
 
-## Recommended approach: Photon AppId override
+```powershell
+Copy-Item plugins\outbound\relbuild\x64\outbound.dll `
+  C:\Users\YOU\Downloads\Outbound\plugins\ -Force
+```
 
-Outbound's multiplayer auth is gated by **Photon Fusion custom auth**: the master server forwards the Steam ticket to Outbound's backend, which validates via Steam Web API and rejects tickets signed for AppId 480 (Spacewar) instead of 2681030. Suppressing the failure callback hides the UI error but the connection is still dead.
+(Create that `plugins\` folder if it doesn't exist.)
 
-The clean workaround is to **redirect the game to a Photon Fusion app you control**, where custom auth is disabled (or trivially permissive). Then there is no rejection. Your players will see only other players on the same redirected app — which for a closed friend group is exactly what you want.
+### 7. Test
 
-### Steps
+Run the game, click **Show Multiplayer Code**. The code should display within a few seconds. Photon's dashboard should show CCU going from 0 → 1 while you're in the session.
 
-1. Sign up at <https://dashboard.photonengine.com/> (free).
-2. Create a new app, type **Fusion**.
-3. Copy the AppId GUID it gives you.
-4. Add it to your `union-crax.ini`:
+Tail the log for `[Outbound]` lines:
 
-   ```ini
-   [Settings]
-   AppId=480
-   ogAppId=2681030
-   PluginsFolder=plugins
-   GetStubbedLol=false
+```powershell
+Get-Content "$env:TEMP\uc_online2.log" -Wait -Tail 30 |
+  Select-String '\[Outbound\]'
+```
 
-   [Outbound]
-   PhotonAppIdFusion=<your-guid-here>
-   ```
+Useful entries:
 
-5. On next launch, the plugin hooks `Fusion.Photon.Realtime.PhotonAppSettings.get_Global` and overwrites the embedded `FusionAppSettings.AppIdFusion` with your GUID. The log will show `[Outbound] AppId patch: FusionAppSettings.AppIdFusion replaced`.
+- `PhotonAppIdFusion override set: …` — config picked up.
+- `LoadBalancingPeer.OpAuthenticate hook installed at …` — primary hook in place.
+- `OpAuthenticate: authValues.authType 1 -> 0` — wire-time override fired (Steam → Custom). **This is the line that proves it works.**
 
-If `PhotonAppIdFusion` isn't set in the ini, the AppId hook is not installed and the plugin behaves as before (auth still fails on Outbound's app).
+## How the plugin works
+
+The plugin hooks the IL2CPP runtime to override two things at the latest possible moment:
+
+1. **AppIdFusion** — patched both at file level (the script) and at runtime when `PhotonAppSettings.get_Global` is called.
+2. **AuthValues.authType** — patched by hooking `LoadBalancingPeer.OpAuthenticate`. IL2CPP inlines the game's own `authValues.AuthType = Steam` assignments past the C# property setter, so we have to intercept the actual wire-send call and rewrite the byte directly on the AuthValues object before serialization.
+
+For a different game on the same stack (Unity + Photon Fusion 2 + Steam custom auth), the same two hooks are likely all that's needed — only the GUID lookup in the static asset edit script changes.
 
 ## Limitations
 
-- IL2CPP hooks are sensitive to the C# method's argument layout. If the game updates and changes the method signature (added/removed an argument), the hook must be updated.
-- The method name is what we rely on; if the developer renames it, lookup fails and the plugin logs `method not found`.
-- IL2CPP's MethodInfo layout has been mostly stable since Unity 2018+; this plugin only touches the first field (`methodPointer`), which has not moved.
+- **Players need to share the same Photon AppId.** Anyone using a different Photon app — including the official Outbound app — won't be on the same cluster and won't see your sessions.
+- **The Cloudflare Worker accepts every authentication request.** Don't reuse the same Photon AppId for any project that needs real auth.
+- **Photon Fusion's free tier has CCU limits** (20 CCU at the time of writing). Plenty for friend groups, not for public servers.
+- **Game updates may break the static edit.** If the developer changes the embedded AppId GUID, edit `Set-OutboundPhotonAppId.ps1` to point at the new stock GUID.
