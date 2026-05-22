@@ -102,7 +102,13 @@ foreach ($f in $assetFiles) {
 }
 
 if ($hits.Count -eq 0) {
-    throw "No Photon Fusion GUID found near 'PhotonAppSettings' markers in any .assets file. Game may not use Photon Fusion, or its serialization layout differs."
+    Write-Host ""
+    Write-Host "ERROR: GUID not found - plugin will not work." -ForegroundColor Red
+    Write-Host "  No Photon Fusion AppId GUID was found inside any .assets" -ForegroundColor Red
+    Write-Host "  file under $($dataDir.FullName)." -ForegroundColor Red
+    Write-Host "  The game probably doesn't use Photon Fusion 2, or it" -ForegroundColor Red
+    Write-Host "  stores its config in a non-standard layout." -ForegroundColor Red
+    exit 2
 }
 
 Write-Output "Discovered $($hits.Count) GUID occurrence(s):"

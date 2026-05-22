@@ -12,6 +12,17 @@ A UCOnline2 plugin that gets multiplayer working for any Unity IL2CPP game built
 
 If you get it working on another game, send a PR — the plugin should "just work" for any Photon Fusion 2 title.
 
+## Quick start
+
+1. Set up a free Photon Fusion 2 app at <https://dashboard.photonengine.com/> and copy the AppId GUID.
+2. Set up a permissive Custom Authentication URL on that app (Cloudflare Worker — full instructions below).
+3. **Run `Setup.bat` from this folder** and follow the prompts. It patches the game's assets — do this BEFORE copying the DLL.
+4. Build `photon_fusion_plugin.vcxproj`, then drop the resulting `photon_fusion.dll` into `<game>\plugins\`.
+5. Add `[Fusion]` section to `<game>\union-crax.ini` (template printed by `Setup.bat`).
+6. Launch the game.
+
+If `Setup.bat` prints `GUID NOT FOUND - plugin will not work`, the game isn't a Photon Fusion 2 target. The DLL won't help on its own — stop and don't bother copying it.
+
 ## How it works (one paragraph)
 
 Outbound (and any game using Photon Fusion 2) embeds the developer's Photon Cloud app GUID inside its Unity assets, plus references the same GUID in IL2CPP-compiled C# code. The plugin replaces both: a one-time edit of `<Game>_Data/*.assets` swaps the disk-side copy, and runtime IL2CPP hooks rewrite any cached or per-call copies before they hit the network. The hooks all target Photon Fusion library code (`PhotonAppSettings`, `AuthenticationValues`, `LoadBalancingPeer`) which is identical across every game using this middleware — that's why the same DLL works for multiple games.
@@ -60,29 +71,37 @@ In Photon dashboard for your app:
 6. **Reject Clients on Authentication Failure: UNCHECKED**.
 7. Save.
 
-### 4. Static-edit the game's bundled AppId
+### 4. Static-edit the game's bundled AppId — DO THIS BEFORE COPYING THE DLL
 
-Run the included PowerShell script from this folder:
+The plugin needs the game's assets to already point at your Photon app or it won't have anything to attach to. Double-click **`Setup.bat`** from this folder. It will:
+
+- Ask for the game folder
+- Ask for your Photon Fusion AppId GUID
+- Find and replace the embedded GUID in `<Game>_Data\*.assets`
+- Print a clear `GUID NOT FOUND - plugin will not work` error if the game doesn't use Photon Fusion 2 (or its asset layout is unusual)
+
+If you prefer to drive the PowerShell directly:
 
 ```powershell
-# Preview what it would change
+# Preview discoveries without modifying any files
 .\Set-PhotonAppId.ps1 -GameDir 'C:\path\to\TheGame' -DryRun
 
 # Apply
 .\Set-PhotonAppId.ps1 -GameDir 'C:\path\to\TheGame' `
                        -NewAppId '4ff936cd-afb9-486b-b8e3-6ab23d915af0'
+
+# Roll back
+.\Set-PhotonAppId.ps1 -GameDir 'C:\path\to\TheGame' -Revert
 ```
 
-The script:
+Under the hood the script:
 - Locates the `<Game>_Data` directory automatically.
 - Scans every `.assets` file inside it for the `"PhotonAppSettings"` marker.
 - Locates the 36-char ASCII GUID near it (length-prefixed at `0x24 00 00 00`).
 - Backs up affected files (`.assets.bak`).
 - Replaces the GUID in place.
 
-To roll back: `.\Set-PhotonAppId.ps1 -GameDir '...' -Revert`.
-
-If the script reports "No Photon Fusion GUID found", the game either doesn't use Photon Fusion 2 or its asset serialization layout differs from what the script expects.
+**If you see `GUID NOT FOUND`, do not proceed.** The plugin will appear to install but won't redirect anything.
 
 ### 5. Configure UCOnline2's ini
 
