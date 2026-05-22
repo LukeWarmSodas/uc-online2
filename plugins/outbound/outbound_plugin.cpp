@@ -853,12 +853,23 @@ static void TryInstallIl2CppHooks()
             (void**)&g_pfnOrigAuthValuesSetAuthType,
             "AuthenticationValues.set_AuthType");
 
-        InstallIl2CppHook(
-            "Fusion.Realtime", "Fusion.Photon.Realtime", "AuthenticationValues",
-            "set_Token", 1,
-            (void*)&Hooked_AuthValues_set_Token,
-            (void**)&g_pfnOrigAuthValuesSetToken,
-            "AuthenticationValues.set_Token");
+        // NOTE: set_Token hook is intentionally DISABLED. Nulling
+        // the Token while AuthType=None puts AuthenticationValues
+        // in a state Photon Fusion's internal preconditions don't
+        // accept; the game gets stuck in a retry loop before any
+        // network attempt is made (observed Photon allocating
+        // tens of thousands of AuthValues per second with no
+        // StartGame / GetAuthSessionTicket activity).
+        //
+        // With only AuthType forced to None, Photon's anonymous
+        // path accepts the connection if the app's Anonymous
+        // Authentication is enabled on the dashboard.
+        // InstallIl2CppHook(
+        //     "Fusion.Realtime", "Fusion.Photon.Realtime", "AuthenticationValues",
+        //     "set_Token", 1,
+        //     (void*)&Hooked_AuthValues_set_Token,
+        //     (void**)&g_pfnOrigAuthValuesSetToken,
+        //     "AuthenticationValues.set_Token");
 
         // Critical: catch the AppId at the connection layer.
         // Fusion.Photon.Realtime.LoadBalancingClient.set_AppId is
