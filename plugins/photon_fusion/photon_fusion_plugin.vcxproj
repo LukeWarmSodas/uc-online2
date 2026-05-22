@@ -19,7 +19,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="outbound_plugin.cpp" />
+    <ClCompile Include="photon_fusion_plugin.cpp" />
     <ClCompile Include="il2cpp_runtime.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -28,7 +28,7 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{B8D4F0E2-C3E5-4678-9012-345678901BCD}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>outbound_plugin</RootNamespace>
+    <RootNamespace>photon_fusion_plugin</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -65,25 +65,25 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
-    <TargetName>outbound</TargetName>
+    <TargetName>photon_fusion</TargetName>
     <OutDir>$(ProjectDir)relbuild\x86\</OutDir>
     <IntDir>relbuild\intermediate\x86\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
-    <TargetName>outbound</TargetName>
+    <TargetName>photon_fusion</TargetName>
     <OutDir>$(ProjectDir)relbuild\x64\</OutDir>
     <IntDir>relbuild\intermediate\x64\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>false</LinkIncremental>
-    <TargetName>outbound</TargetName>
+    <TargetName>photon_fusion</TargetName>
     <OutDir>$(ProjectDir)debbuild\x86\</OutDir>
     <IntDir>debbuild\intermediate\x86\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>false</LinkIncremental>
-    <TargetName>outbound</TargetName>
+    <TargetName>photon_fusion</TargetName>
     <OutDir>$(ProjectDir)debbuild\x64\</OutDir>
     <IntDir>debbuild\intermediate\x64\</IntDir>
   </PropertyGroup>

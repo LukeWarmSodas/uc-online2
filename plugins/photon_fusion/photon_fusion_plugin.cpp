@@ -1,20 +1,31 @@
 // ============================================================
-// UCOnline2 plugin -- Outbound (Steam AppId 2681030)
+// UCOnline2 plugin -- Photon Fusion 2 universal redirect
 //
-// Reference plugin built against the UCOnline2 v1 plugin ABI
-// (see include/uco_plugin.h). It redirects Outbound's
-// multiplayer ("Show Multiplayer Code") from the developer's
-// Photon Fusion Cloud app to one the user controls, so users
-// without a publisher Steam key can still play together.
+// Generic plugin against the UCOnline2 v1 plugin ABI (see
+// include/uco_plugin.h) that gets multiplayer working for
+// any Unity IL2CPP game built on Photon Fusion 2 whose
+// auth is gated behind Steam-backed custom authentication.
+//
+// Works by redirecting the game from the developer's Photon
+// Cloud app to one the user controls, then forcing the
+// wire-time AuthType so Photon's master accepts the client
+// without a publisher Steam key.
+//
+// Confirmed working on:
+//   - Outbound  (Steam AppId 2681030)
+//
+// To add support for another game: usually nothing here
+// changes. You configure your Photon Cloud GUID in
+// union-crax.ini and run Set-PhotonAppId.ps1 against the
+// game's resources.assets to swap the embedded GUID. The
+// hooks below all target Photon Fusion library code that's
+// identical across games.
 //
 // Mechanism (kept minimal after extensive iteration):
 //
-//   1. **Static edit of resources.assets** rewrites the embedded
-//      PhotonAppSettings.AppIdFusion GUID to the user's app.
-//      This is the simplest, most reliable AppId redirect path
-//      and survives game updates as long as the asset file
-//      contains the GUID in plaintext. See plugins/outbound/
-//      README.md for the script.
+//   1. **Static edit of <game>_Data/resources.assets** rewrites
+//      the embedded PhotonAppSettings.AppIdFusion GUID to the
+//      user's app. See Set-PhotonAppId.ps1.
 //
 //   2. **PhotonAppSettings.get_Global** hook (defense-in-depth)
 //      patches the cached singleton's AppIdFusion in case the
@@ -35,7 +46,7 @@
 //
 // Configuration is read from union-crax.ini next to the game
 // exe:
-//   [Outbound]
+//   [Fusion]
 //   PhotonAppIdFusion=<your photon app's GUID>
 //   ForcedAuthType=0   (Custom; pair with a permissive
 //                       Custom Authentication URL on Photon)
@@ -101,13 +112,13 @@ static bool InstallIl2CppHook(const char* image, const char* ns, const char* kla
                               const char* logName)
 {
     void* fn = IL2CPP_FindMethodPtr(image, ns, klass, method, argc);
-    if (!fn) { LOG("[Outbound] IL2CPP: could not find %s", logName); return false; }
+    if (!fn) { LOG("[Fusion] IL2CPP: could not find %s", logName); return false; }
     if (MH_CreateHook(fn, hook, orig) != MH_OK || MH_EnableHook(fn) != MH_OK)
     {
-        LOG("[Outbound] hook FAILED for %s", logName);
+        LOG("[Fusion] hook FAILED for %s", logName);
         return false;
     }
-    LOG("[Outbound] %s hook installed at %p", logName, fn);
+    LOG("[Fusion] %s hook installed at %p", logName, fn);
     return true;
 }
 
@@ -130,7 +141,7 @@ static void* __fastcall Hooked_PhotonAppSettings_get_Global()
     {
         g_OurFusionAppIdString = IL2CPP_StringNew(g_OurFusionAppIdUtf8);
         if (!g_OurFusionAppIdString) return settings;
-        LOG("[Outbound] built managed string for '%s' at %p",
+        LOG("[Fusion] built managed string for '%s' at %p",
             g_OurFusionAppIdUtf8, g_OurFusionAppIdString);
     }
 
@@ -143,7 +154,7 @@ static void* __fastcall Hooked_PhotonAppSettings_get_Global()
     {
         void* oldStr = *pAppIdFusion;
         *pAppIdFusion = g_OurFusionAppIdString;
-        LOG("[Outbound] PhotonAppSettings.AppIdFusion replaced (was %p)", oldStr);
+        LOG("[Fusion] PhotonAppSettings.AppIdFusion replaced (was %p)", oldStr);
     }
     return settings;
 }
@@ -169,7 +180,7 @@ static void __fastcall Hooked_AuthValues_set_AuthType(void* pThis, unsigned int 
         && InterlockedExchange(&g_TriedForceGlobal, 1) == 0
         && g_pfnOrigPhotonAppSettingsGetGlobal != nullptr)
     {
-        LOG("[Outbound] forcing PhotonAppSettings.get_Global to apply AppId patch");
+        LOG("[Fusion] forcing PhotonAppSettings.get_Global to apply AppId patch");
         Hooked_PhotonAppSettings_get_Global();
     }
     g_pfnOrigAuthValuesSetAuthType(pThis, g_ForcedAuthType);
@@ -200,7 +211,7 @@ static void PatchAuthValuesAuthType(void* authValues, const char* sender)
     unsigned char* p = (unsigned char*)authValues + kOffsetAuthValues_authType;
     unsigned char prev = *p;
     *p = (unsigned char)(g_ForcedAuthType & 0xFF);
-    LOG("[Outbound] %s: authValues.authType %u -> %u", sender, prev, g_ForcedAuthType);
+    LOG("[Fusion] %s: authValues.authType %u -> %u", sender, prev, g_ForcedAuthType);
 }
 
 static bool __fastcall Hooked_OpAuthenticate(
@@ -280,7 +291,7 @@ static DWORD WINAPI WatcherProc(LPVOID)
         Sleep(200);
     }
     if (!InterlockedCompareExchange(&g_bShutdown, 0, 0))
-        LOG("[Outbound] GameAssembly.dll never resolved -- giving up on IL2CPP hooks");
+        LOG("[Fusion] GameAssembly.dll never resolved -- giving up on IL2CPP hooks");
     return 0;
 }
 
@@ -317,37 +328,37 @@ extern "C" __declspec(dllexport) int __cdecl UCO_PluginInit(const UCO_PluginCont
     g_ForcedAppId    = ctx->ForcedAppId;
     g_OriginalAppId  = ctx->OriginalAppId;
 
-    LOG("[Outbound] plugin v1 init: AppId=%u ogAppId=%u",
+    LOG("[Fusion] plugin v1 init: AppId=%u ogAppId=%u",
         g_ForcedAppId, g_OriginalAppId);
 
-    // Read [Outbound] PhotonAppIdFusion from union-crax.ini.
+    // Read [Fusion] PhotonAppIdFusion from union-crax.ini.
     const char* ini = GetIniPath();
     if (ini)
     {
-        GetPrivateProfileStringA("Outbound", "PhotonAppIdFusion", "",
+        GetPrivateProfileStringA("Fusion", "PhotonAppIdFusion", "",
                                  g_OurFusionAppIdUtf8,
                                  sizeof(g_OurFusionAppIdUtf8), ini);
         if (g_OurFusionAppIdUtf8[0])
         {
             g_AppIdPatchEnabled = true;
-            LOG("[Outbound] PhotonAppIdFusion override set: %s", g_OurFusionAppIdUtf8);
+            LOG("[Fusion] PhotonAppIdFusion override set: %s", g_OurFusionAppIdUtf8);
         }
         else
         {
-            LOG("[Outbound] no [Outbound]PhotonAppIdFusion in ini -- AppId patch disabled");
+            LOG("[Fusion] no [Fusion]PhotonAppIdFusion in ini -- AppId patch disabled");
         }
 
         char authTypeBuf[8] = {};
-        GetPrivateProfileStringA("Outbound", "ForcedAuthType", "0",
+        GetPrivateProfileStringA("Fusion", "ForcedAuthType", "0",
                                  authTypeBuf, sizeof(authTypeBuf), ini);
         unsigned int parsed = (unsigned int)strtoul(authTypeBuf, nullptr, 10);
         if (parsed <= 255) g_ForcedAuthType = parsed;
-        LOG("[Outbound] forced AuthType = %u", g_ForcedAuthType);
+        LOG("[Fusion] forced AuthType = %u", g_ForcedAuthType);
     }
 
     if (MH_Initialize() != MH_OK)
     {
-        LOG("[Outbound] MH_Initialize failed");
+        LOG("[Fusion] MH_Initialize failed");
         return 3;
     }
 
@@ -368,7 +379,7 @@ extern "C" __declspec(dllexport) void __cdecl UCO_PluginShutdown(void)
     }
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
-    LOG("[Outbound] plugin shutdown");
+    LOG("[Fusion] plugin shutdown");
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
