@@ -64,6 +64,12 @@ S_API void* S_CALLTYPE SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012()
 	return SteamInternal_FindOrCreateGameServerInterface(g_ServerUser, STEAMNETWORKINGSOCKETS_INTERFACE_VERSION);
 }
 
+S_API void* S_CALLTYPE SteamAPI_SteamGameServerNetworkingSockets_v008()
+{
+	UCOLOG("[UCOnline2] SteamAPI_SteamGameServerNetworkingSockets_v008\r\n");
+	return SteamInternal_FindOrCreateGameServerInterface(g_ServerUser, "SteamNetworkingSockets008");
+}
+
 S_API ISteamHTTP* S_CALLTYPE SteamAPI_SteamGameServerHTTP_v003()
 {
 	UCOLOG("[UCOnline2] SteamAPI_SteamGameServerHTTP_v003\r\n");
@@ -146,6 +152,12 @@ S_API void* S_CALLTYPE SteamAPI_SteamNetworkingSockets_SteamAPI_v012()
 {
 	UCOLOG("[UCOnline2] SteamAPI_SteamNetworkingSockets_SteamAPI_v012\r\n");
 	return SteamInternal_FindOrCreateUserInterface(g_ClientUser, STEAMNETWORKINGSOCKETS_INTERFACE_VERSION);
+}
+
+S_API void* S_CALLTYPE SteamAPI_SteamNetworkingSockets_v008()
+{
+	UCOLOG("[UCOnline2] SteamAPI_SteamNetworkingSockets_v008\r\n");
+	return SteamInternal_FindOrCreateUserInterface(g_ClientUser, "SteamNetworkingSockets008");
 }
 
 S_API void* S_CALLTYPE SteamAPI_SteamNetworkingUtils_SteamAPI_v004()

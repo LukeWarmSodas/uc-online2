@@ -1,7 +1,6 @@
 S_API ISteamApps* S_CALLTYPE SteamApps()
 {
-	UCOLOG("[UCOnline2] SteamApps\r\n");
-	return g_bClientReady ? g_ClientCtx.SteamApps() : nullptr;
+    return g_bClientReady ? &s_AppsStub : nullptr;  // Always return our stub
 }
 
 S_API ISteamClient* S_CALLTYPE SteamClient()
