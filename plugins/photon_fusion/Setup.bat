@@ -8,20 +8,27 @@ REM  Walks the user through the full install:
 REM    1. asks for the game folder
 REM    2. asks for the Photon Fusion 2 AppId GUID
 REM    3. asks for the game's real Steam AppId
-REM    4. patches the embedded PhotonAppSettings GUID in
-REM       the game's resources.assets
-REM    5. drops photon_fusion.dll into <game>\plugins\
-REM    6. writes a complete union-crax.ini at <game>\
+REM    4. drops photon_fusion.dll into <game>\plugins\
+REM    5. writes a complete union-crax.ini at <game>\
+REM
+REM  The game's resources.assets is NOT modified. The plugin
+REM  hooks PhotonAppSettings.get_Global at runtime to rewrite
+REM  AppIdFusion in the loaded singleton, so the ini is the
+REM  single source of truth. Change the GUID later -> just
+REM  edit union-crax.ini, no re-patching.
+REM
+REM  (Set-PhotonAppId.ps1 is kept in this folder as an
+REM  optional fallback for cases where runtime override
+REM  isn't enough.)
 REM
 REM  For IL2CPP Unity games using Photon Fusion 2.
-REM  For PUN games use plugins\photon_pun\Setup.bat (IL2CPP)
-REM  or plugins\photon_pun_mono\Setup.bat (Mono).
+REM  For PUN games use plugins\photon_realtime\Setup.bat (IL2CPP)
+REM  or plugins\photon_realtime_mono\Setup.bat (Mono).
 REM ============================================================
 
 title Photon Fusion 2 Fix - Setup
 
 set "SCRIPT_DIR=%~dp0"
-set "PS1_PATH=%SCRIPT_DIR%Set-PhotonAppId.ps1"
 set "DLL_PATH=%SCRIPT_DIR%relbuild\x64\photon_fusion.dll"
 
 echo.
@@ -63,35 +70,7 @@ set /p OG_APPID="The game's real Steam AppId (e.g. 2681030 for Outbound): "
 
 echo.
 echo ============================================================
-echo   1/3  Patching game assets...
-echo ============================================================
-echo.
-
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1_PATH%" -GameDir "%GAME_DIR%" -NewAppId "%NEW_GUID%"
-set RC=%errorlevel%
-
-if not %RC%==0 (
-  echo.
-  echo ============================================================
-  echo   ERROR: GUID NOT FOUND - the plugin will NOT work
-  echo ============================================================
-  echo.
-  echo  The script could not find a Photon Fusion AppId GUID
-  echo  in this game's assets. Possible causes:
-  echo    - Wrong folder picked (must contain the .exe and the
-  echo      ^<Game^>_Data subfolder)
-  echo    - Game does not use Photon Fusion 2 -- try
-  echo      photon_pun\Setup.bat for PUN games
-  echo    - Already patched on a previous run (rerun with -Revert
-  echo      first if you want to change to a different GUID)
-  echo.
-  pause
-  exit /b 1
-)
-
-echo.
-echo ============================================================
-echo   2/3  Copying photon_fusion.dll into the game folder...
+echo   1/2  Copying photon_fusion.dll into the game folder...
 echo ============================================================
 echo.
 
@@ -120,7 +99,7 @@ echo  Copied  photon_fusion.dll  -^>  %GAME_DIR%\plugins\
 
 echo.
 echo ============================================================
-echo   3/3  Writing union-crax.ini at the game root...
+echo   2/2  Writing union-crax.ini at the game root...
 echo ============================================================
 echo.
 
@@ -151,9 +130,14 @@ echo   SUCCESS - setup complete
 echo ============================================================
 echo.
 echo  What was done:
-echo    [+] resources.assets patched to use your Photon AppId
 echo    [+] photon_fusion.dll dropped into %GAME_DIR%\plugins\
 echo    [+] union-crax.ini written at %GAME_DIR%\
+echo.
+echo  The game's resources.assets was NOT touched. The plugin
+echo  rewrites the Fusion AppId at runtime via the
+echo  PhotonAppSettings.get_Global hook, driven by
+echo  [Fusion] PhotonAppIdFusion in the ini. To change the GUID
+echo  later just edit union-crax.ini -- no re-patching.
 echo.
 echo  Remaining steps you still need to do yourself:
 echo    [ ] Drop UCOnline2's steam_api64.dll into:

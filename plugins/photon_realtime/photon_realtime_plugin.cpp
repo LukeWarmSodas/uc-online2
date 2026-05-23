@@ -31,7 +31,7 @@
 //
 // Configuration (next to the game exe, union-crax.ini):
 //
-//   [PUN]
+//   [Realtime]
 //   PhotonAppIdRealtime=<your photon app's GUID>
 //   ForcedAuthType=0    (Custom; pair with permissive Custom
 //                        Authentication URL on Photon)
@@ -60,10 +60,62 @@ static uint32_t  g_OriginalAppId    = 0;
 static volatile LONG g_bShutdown    = 0;
 static HANDLE    g_hWatcherThread   = nullptr;
 
+#define LOG(...) do { if (g_Log) g_Log(__VA_ARGS__); } while (0)
+
 // Photon AppId override read from union-crax.ini
-static char  g_OurAppIdUtf8[64]    = {};
-static void* g_OurAppIdString      = nullptr;  // Il2CppString*
-static bool  g_AppIdPatchEnabled   = false;
+//
+// We keep two slots: Realtime (the main PUN/master cloud) and
+// Voice (Photon Voice cloud). PUN games that ship voice chat
+// (R.E.P.O., Phasmophobia) connect to two separate Photon
+// clouds simultaneously with two separate AppIds, so a single
+// AppId override isn't enough.
+//
+// Voice is optional -- if PhotonAppIdVoice is absent the Voice
+// peer is passed through unchanged and authenticates against
+// whatever the game's PhotonServerSettings has baked in.
+static char  g_OurAppIdUtf8[64]      = {};
+static void* g_OurAppIdString        = nullptr;  // Il2CppString*
+static bool  g_AppIdPatchEnabled     = false;
+
+static char  g_OurVoiceAppIdUtf8[64] = {};
+static void* g_OurVoiceAppIdString   = nullptr;
+static bool  g_VoiceAppIdEnabled     = false;
+
+// Peer classifier. PUN games run multiple PhotonPeer instances
+// concurrently (one per cloud: Master/Realtime, Voice, sometimes
+// Chat). Each instance authenticates with its own baked AppId.
+// We tag the first peer we observe as Realtime (product 0) and
+// the next distinct peer as Voice (product 1). If a game adds
+// more peers later they fall back to Realtime, which is the
+// safer default.
+//
+// 4 slots is generous -- in practice 2 is the max for PUN+Voice.
+struct PeerSlot { void* pThis; int product; };
+static PeerSlot g_Peers[4] = {};
+static int      g_PeerCount = 0;
+static CRITICAL_SECTION g_PeerCs;
+static bool             g_PeerCsInit = false;
+
+static int ClassifyPeer(void* pThis)
+{
+    if (!pThis) return 0;
+    EnterCriticalSection(&g_PeerCs);
+    int product = 0;
+    bool found = false;
+    for (int i = 0; i < g_PeerCount; ++i) {
+        if (g_Peers[i].pThis == pThis) { product = g_Peers[i].product; found = true; break; }
+    }
+    if (!found) {
+        product = (g_PeerCount == 0) ? 0 : 1;
+        if (g_PeerCount < (int)(sizeof(g_Peers)/sizeof(g_Peers[0]))) {
+            g_Peers[g_PeerCount++] = { pThis, product };
+            LOG("[Realtime] new peer %p classified as %s", pThis,
+                product == 0 ? "Realtime" : "Voice");
+        }
+    }
+    LeaveCriticalSection(&g_PeerCs);
+    return product;
+}
 
 // CustomAuthenticationType byte enum:
 //   Custom = 0, Steam = 1, Facebook = 2, ..., None = 255.
@@ -74,8 +126,6 @@ static unsigned int g_ForcedAuthType = 0;
 // sits at +0x10. Same layout used in PUN since they share the
 // realtime client.
 static const size_t kOffsetAuthValues_authType = 0x10;
-
-#define LOG(...) do { if (g_Log) g_Log(__VA_ARGS__); } while (0)
 
 extern "C" void IL2CPP_Log(const char* fmt, ...)
 {
@@ -96,13 +146,13 @@ static bool InstallIl2CppHook(const char* image, const char* ns, const char* kla
                               const char* logName)
 {
     void* fn = IL2CPP_FindMethodPtr(image, ns, klass, method, argc);
-    if (!fn) { LOG("[PUN] IL2CPP: could not find %s", logName); return false; }
+    if (!fn) { LOG("[Realtime] IL2CPP: could not find %s", logName); return false; }
     if (MH_CreateHook(fn, hook, orig) != MH_OK || MH_EnableHook(fn) != MH_OK)
     {
-        LOG("[PUN] hook FAILED for %s", logName);
+        LOG("[Realtime] hook FAILED for %s", logName);
         return false;
     }
-    LOG("[PUN] %s hook installed at %p", logName, fn);
+    LOG("[Realtime] %s hook installed at %p", logName, fn);
     return true;
 }
 
@@ -139,25 +189,59 @@ typedef bool (__fastcall *Fn_OpAuthenticateOnce)(
     void* regionCode, int encryptionMode, int expectedProtocol);
 static Fn_OpAuthenticateOnce g_pfnOrigOpAuthenticateOnce = nullptr;
 
-// Make sure we have a managed Il2CppString of our AppId GUID
-// ready to substitute. Called lazily on the main thread.
-static void EnsureOurAppIdString()
+// Make sure we have managed Il2CppString instances of our AppId
+// GUIDs ready to substitute. Called lazily on the main thread.
+static void EnsureAppIdStrings()
 {
-    if (g_OurAppIdString || !g_AppIdPatchEnabled) return;
-    g_OurAppIdString = IL2CPP_StringNew(g_OurAppIdUtf8);
-    if (g_OurAppIdString)
-        LOG("[PUN] built managed string for '%s' at %p",
-            g_OurAppIdUtf8, g_OurAppIdString);
+    if (g_AppIdPatchEnabled && !g_OurAppIdString) {
+        g_OurAppIdString = IL2CPP_StringNew(g_OurAppIdUtf8);
+        if (g_OurAppIdString)
+            LOG("[Realtime] built managed string for Realtime '%s' at %p",
+                g_OurAppIdUtf8, g_OurAppIdString);
+    }
+    if (g_VoiceAppIdEnabled && !g_OurVoiceAppIdString) {
+        g_OurVoiceAppIdString = IL2CPP_StringNew(g_OurVoiceAppIdUtf8);
+        if (g_OurVoiceAppIdString)
+            LOG("[Realtime] built managed string for Voice '%s' at %p",
+                g_OurVoiceAppIdUtf8, g_OurVoiceAppIdString);
+    }
 }
 
-static void* PatchAppIdArg(void* appId, const char* sender)
+// Pick which user-configured AppId string to substitute based on
+// the peer's product classification. Returns the original appId
+// unchanged if the relevant override isn't configured (e.g. Voice
+// patch off, Voice peer falls through untouched).
+static void* PatchAppIdArg(void* pThis, void* appId, const char* sender)
 {
-    if (!g_AppIdPatchEnabled) return appId;
-    EnsureOurAppIdString();
-    if (!g_OurAppIdString) return appId;
-    if (appId != g_OurAppIdString)
-        LOG("[PUN] %s: appId arg %p -> %p", sender, appId, g_OurAppIdString);
-    return g_OurAppIdString;
+    EnsureAppIdStrings();
+    int product = ClassifyPeer(pThis);
+    void* replacement = nullptr;
+    const char* productName = "Realtime";
+    if (product == 1) {
+        replacement = g_VoiceAppIdEnabled ? g_OurVoiceAppIdString : nullptr;
+        productName = "Voice";
+    } else {
+        replacement = g_AppIdPatchEnabled ? g_OurAppIdString : nullptr;
+    }
+    if (!replacement) return appId;
+    if (appId != replacement)
+        LOG("[Realtime] %s (%s peer): appId arg %p -> %p", sender, productName,
+            appId, replacement);
+    return replacement;
+}
+
+// SendOperation rewrites params[224] via UTF-8; pick the matching
+// user GUID for the classified peer. Returns nullptr if no
+// rewrite should happen (e.g. Voice peer with no Voice override).
+static const char* PickAppIdUtf8ForPeer(void* pThis, const char** outProductName)
+{
+    int product = ClassifyPeer(pThis);
+    if (product == 1) {
+        if (outProductName) *outProductName = "Voice";
+        return g_VoiceAppIdEnabled ? g_OurVoiceAppIdUtf8 : nullptr;
+    }
+    if (outProductName) *outProductName = "Realtime";
+    return g_AppIdPatchEnabled ? g_OurAppIdUtf8 : nullptr;
 }
 
 static void PatchAuthValuesAuthType(void* authValues, const char* sender)
@@ -166,14 +250,14 @@ static void PatchAuthValuesAuthType(void* authValues, const char* sender)
     unsigned char* p = (unsigned char*)authValues + kOffsetAuthValues_authType;
     unsigned char prev = *p;
     *p = (unsigned char)(g_ForcedAuthType & 0xFF);
-    LOG("[PUN] %s: authValues.authType %u -> %u", sender, prev, g_ForcedAuthType);
+    LOG("[Realtime] %s: authValues.authType %u -> %u", sender, prev, g_ForcedAuthType);
 }
 
 static bool __fastcall Hooked_OpAuthenticate(
     void* pThis, void* appId, void* appVersion, void* authValues,
     void* regionCode, bool getLobbyStatistics)
 {
-    appId = PatchAppIdArg(appId, "OpAuthenticate");
+    appId = PatchAppIdArg(pThis, appId, "OpAuthenticate");
     PatchAuthValuesAuthType(authValues, "OpAuthenticate");
     return g_pfnOrigOpAuthenticate(pThis, appId, appVersion, authValues,
                                     regionCode, getLobbyStatistics);
@@ -183,7 +267,7 @@ static bool __fastcall Hooked_OpAuthenticateOnce(
     void* pThis, void* appId, void* appVersion, void* authValues,
     void* regionCode, int encryptionMode, int expectedProtocol)
 {
-    appId = PatchAppIdArg(appId, "OpAuthenticateOnce");
+    appId = PatchAppIdArg(pThis, appId, "OpAuthenticateOnce");
     PatchAuthValuesAuthType(authValues, "OpAuthenticateOnce");
     return g_pfnOrigOpAuthenticateOnce(pThis, appId, appVersion, authValues,
                                         regionCode, encryptionMode, expectedProtocol);
@@ -222,26 +306,28 @@ static bool __fastcall Hooked_SendOperation(void* pThis, uint8_t opCode, void* p
         case 253: opName = "RaiseEvent";      break;
         case 254: opName = "Leave";           break;
     }
-    LOG("[PUN] SendOperation opCode=%u (%s) params=%p", opCode, opName, params);
+    LOG("[Realtime] SendOperation opCode=%u (%s) params=%p", opCode, opName, params);
 
     if (isAuth && params)
     {
         char buf[256];
         Il2CppObject* cur = IL2CPP_DictByteGetItem((Il2CppObject*)params, 224);
         IL2CPP_DescribeObject(cur, buf, sizeof(buf));
-        LOG("[PUN] SendOperation: BEFORE params[224] (AppId) = %s", buf);
+        LOG("[Realtime] SendOperation: BEFORE params[224] (AppId) = %s", buf);
 
-        if (g_AppIdPatchEnabled && g_OurAppIdUtf8[0])
+        const char* productName = "Realtime";
+        const char* userAppId   = PickAppIdUtf8ForPeer(pThis, &productName);
+        if (userAppId && userAppId[0])
         {
-            if (IL2CPP_DictByteStringSetItem((Il2CppObject*)params, 224, g_OurAppIdUtf8))
-                LOG("[PUN] SendOperation: rewrote params[224] AppId -> %s",
-                    g_OurAppIdUtf8);
+            if (IL2CPP_DictByteStringSetItem((Il2CppObject*)params, 224, userAppId))
+                LOG("[Realtime] SendOperation (%s peer): rewrote params[224] AppId -> %s",
+                    productName, userAppId);
         }
         if (g_ForcedAuthType <= 255)
         {
             if (IL2CPP_DictByteByteSetItem((Il2CppObject*)params, 217,
                                             (uint8_t)(g_ForcedAuthType & 0xFF)))
-                LOG("[PUN] SendOperation: rewrote params[217] AuthType -> %u",
+                LOG("[Realtime] SendOperation: rewrote params[217] AuthType -> %u",
                     g_ForcedAuthType);
         }
     }
@@ -315,7 +401,7 @@ static DWORD WINAPI WatcherProc(LPVOID)
         Sleep(200);
     }
     if (!InterlockedCompareExchange(&g_bShutdown, 0, 0))
-        LOG("[PUN] GameAssembly.dll never resolved -- giving up on IL2CPP hooks");
+        LOG("[Realtime] GameAssembly.dll never resolved -- giving up on IL2CPP hooks");
     return 0;
 }
 
@@ -352,36 +438,70 @@ extern "C" __declspec(dllexport) int __cdecl UCO_PluginInit(const UCO_PluginCont
     g_ForcedAppId    = ctx->ForcedAppId;
     g_OriginalAppId  = ctx->OriginalAppId;
 
-    LOG("[PUN] plugin v1 init: AppId=%u ogAppId=%u",
+    LOG("[Realtime] plugin v1 init: AppId=%u ogAppId=%u",
         g_ForcedAppId, g_OriginalAppId);
+
+    if (!g_PeerCsInit) { InitializeCriticalSection(&g_PeerCs); g_PeerCsInit = true; }
 
     const char* ini = GetIniPath();
     if (ini)
     {
-        GetPrivateProfileStringA("PUN", "PhotonAppIdRealtime", "",
+        // New ini section is [Realtime]; we also fall back to the
+        // legacy [PUN] section so existing user inis keep working
+        // after the rename from "PUN" to "Realtime" in the plugin's
+        // naming. Setup.bat now writes [Realtime].
+        GetPrivateProfileStringA("Realtime", "PhotonAppIdRealtime", "",
                                  g_OurAppIdUtf8,
                                  sizeof(g_OurAppIdUtf8), ini);
+        if (!g_OurAppIdUtf8[0])
+        {
+            GetPrivateProfileStringA("PUN", "PhotonAppIdRealtime", "",
+                                     g_OurAppIdUtf8,
+                                     sizeof(g_OurAppIdUtf8), ini);
+        }
         if (g_OurAppIdUtf8[0])
         {
             g_AppIdPatchEnabled = true;
-            LOG("[PUN] PhotonAppIdRealtime override set: %s", g_OurAppIdUtf8);
+            LOG("[Realtime] PhotonAppIdRealtime override set: %s", g_OurAppIdUtf8);
         }
         else
         {
-            LOG("[PUN] no [PUN]PhotonAppIdRealtime in ini -- AppId patch disabled");
+            LOG("[Realtime] no PhotonAppIdRealtime in ini (section [Realtime] or [PUN]) -- Realtime AppId patch disabled");
+        }
+
+        GetPrivateProfileStringA("Realtime", "PhotonAppIdVoice", "",
+                                 g_OurVoiceAppIdUtf8,
+                                 sizeof(g_OurVoiceAppIdUtf8), ini);
+        if (!g_OurVoiceAppIdUtf8[0])
+        {
+            GetPrivateProfileStringA("PUN", "PhotonAppIdVoice", "",
+                                     g_OurVoiceAppIdUtf8,
+                                     sizeof(g_OurVoiceAppIdUtf8), ini);
+        }
+        if (g_OurVoiceAppIdUtf8[0])
+        {
+            g_VoiceAppIdEnabled = true;
+            LOG("[Realtime] PhotonAppIdVoice override set: %s", g_OurVoiceAppIdUtf8);
+        }
+        else
+        {
+            LOG("[Realtime] no PhotonAppIdVoice in ini -- Voice peer passthrough");
         }
 
         char authTypeBuf[8] = {};
-        GetPrivateProfileStringA("PUN", "ForcedAuthType", "0",
+        GetPrivateProfileStringA("Realtime", "ForcedAuthType", "",
                                  authTypeBuf, sizeof(authTypeBuf), ini);
+        if (!authTypeBuf[0])
+            GetPrivateProfileStringA("PUN", "ForcedAuthType", "0",
+                                     authTypeBuf, sizeof(authTypeBuf), ini);
         unsigned int parsed = (unsigned int)strtoul(authTypeBuf, nullptr, 10);
         if (parsed <= 255) g_ForcedAuthType = parsed;
-        LOG("[PUN] forced AuthType = %u", g_ForcedAuthType);
+        LOG("[Realtime] forced AuthType = %u", g_ForcedAuthType);
     }
 
     if (MH_Initialize() != MH_OK)
     {
-        LOG("[PUN] MH_Initialize failed");
+        LOG("[Realtime] MH_Initialize failed");
         return 3;
     }
 
@@ -400,7 +520,7 @@ extern "C" __declspec(dllexport) void __cdecl UCO_PluginShutdown(void)
     }
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
-    LOG("[PUN] plugin shutdown");
+    LOG("[Realtime] plugin shutdown");
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }

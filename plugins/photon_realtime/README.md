@@ -1,8 +1,8 @@
-# photon_pun plugin
+# photon_realtime plugin
 
 **Universal Photon PUN multiplayer redirect for Unity IL2CPP games.**
 
-Sibling of [`photon_fusion`](../photon_fusion/) (for Fusion 2 games) and [`photon_pun_mono`](../photon_pun_mono/) (for Mono PUN games). Redirects the game from the developer's Photon Cloud app to one you control, then forces the wire-time auth type so Photon's master accepts the client without a publisher Steam key.
+Sibling of [`photon_fusion`](../photon_fusion/) (for Fusion 2 games) and [`photon_realtime_mono` (formerly `photon_pun_mono`)](../photon_realtime_mono/) (for Mono PUN games). Redirects the game from the developer's Photon Cloud app to one you control, then forces the wire-time auth type so Photon's master accepts the client without a publisher Steam key.
 
 ## Quick terminology
 
@@ -11,15 +11,13 @@ Sibling of [`photon_fusion`](../photon_fusion/) (for Fusion 2 games) and [`photo
 - A PUN game's Photon dashboard app is a **Realtime-type** app. PUN was a separate dashboard product type historically but Photon merged it into Realtime years ago.
 - If the game has voice chat (via `PhotonVoice.PUN.dll`), it needs a **second, separate** Photon app of type **`Voice`** with its own AppId GUID.
 
-This plugin targets IL2CPP-compiled Unity games whose C# code is in `GameAssembly.dll` (no `Managed/` folder of .NET DLLs). For Mono-compiled games use [`photon_pun_mono`](../photon_pun_mono/).
+This plugin targets IL2CPP-compiled Unity games whose C# code is in `GameAssembly.dll` (no `Managed/` folder of .NET DLLs). For Mono-compiled games use [`photon_realtime_mono` (formerly `photon_pun_mono`)](../photon_realtime_mono/).
 
 ## Confirmed working
 
 | Game | Steam AppId | Notes |
 |---|---|---|
-| _(none yet)_ | | |
-
-**Known hard:** Phasmophobia (Steam 739630) — Phasmo's `Assembly-CSharp.dll` is Beebyte-obfuscated and gates multiplayer behind a UGS-auth UI check that fires *before* the Photon wire layer. None of this plugin's hooks help because PUN's `OpAuthenticate` / `SendOperation` are never reached. Cracking it needs the [OsOmE1/Beebyte-Deobfuscator](https://github.com/OsOmE1/Beebyte-Deobfuscator) tool to recover original class names, then a game-specific patch to bypass that UI check.
+| Phasmophobia | 739630 | Requires the [`unity_auth_bypass`](../unity_auth_bypass/) plugin alongside this one — it NOPs Phasmo's Beebyte-obfuscated `SteamAuth` ticket-verify gate that would otherwise fire before Photon is reached. |
 
 ## Quick start
 
@@ -27,10 +25,11 @@ This plugin targets IL2CPP-compiled Unity games whose C# code is in `GameAssembl
    - One of type **`Realtime`** (used for the main multiplayer connection — even though the game uses PUN, the dashboard app type is Realtime).
    - One of type **`Voice`** if the game has voice chat (most do).
 2. On each app, **Manage → Authentication → Add Provider → Custom**. Paste the same permissive Cloudflare Worker URL on both. **Uncheck "Reject Clients on Authentication Failure"**. Save.
-3. **Double-click `Setup.bat`** in this folder. It prompts for: game folder → Realtime GUID → Voice GUID → real Steam AppId. It will:
-   - Patch every Photon AppId slot in the game's `resources.assets`.
-   - Drop `photon_pun.dll` into `<game>\plugins\`.
+3. **Double-click `Setup.bat`** in this folder. It prompts for: game folder → Realtime GUID → Voice GUID (optional) → real Steam AppId. It will:
+   - Drop `photon_realtime.dll` into `<game>\plugins\`.
    - Write a complete `union-crax.ini` at the game root.
+
+   The game's `resources.assets` is **not** modified. The plugin rewrites the Photon AppId on the wire at runtime, with the ini as the single source of truth. To change the GUID later just edit `union-crax.ini` — no re-patching. (If a future game needs static-edit fallback, `Set-PhotonAppId.ps1` is still in this folder.)
 4. Drop UCOnline2's `steam_api64.dll` into `<game>\<Game>_Data\Plugins\x86_64\` (back up the original first).
 5. Launch the game.
 
@@ -38,14 +37,14 @@ If `Setup.bat` prints `GUID NOT FOUND`, the game isn't a Photon PUN target. The 
 
 ## How it differs from `photon_fusion`
 
-| | `photon_fusion` | `photon_pun` |
+| | `photon_fusion` | `photon_realtime` (formerly `photon_pun`) |
 |---|---|---|
 | Target middleware | Fusion 2 | PUN (built on Realtime SDK) |
 | Library DLLs in game | `Fusion.Realtime.dll` etc. | `PhotonUnityNetworking.dll` + `PhotonRealtime.dll` |
 | Class namespace | `Fusion.Photon.Realtime` | `Photon.Realtime` (and `Photon.Pun`) |
 | ScriptableObject | `PhotonAppSettings` (single GUID `AppIdFusion`) | `ServerSettings` (multiple GUIDs: `AppIdRealtime`, `AppIdChat`, `AppIdVoice`, `AppIdFusion`) |
 | Photon dashboard app | type `Fusion` | type `Realtime` (+ `Voice` for voice-chat games) |
-| ini section | `[Fusion]` | `[PUN]` |
+| ini section | `[Fusion]` | `[Realtime]` (legacy `[PUN]` also accepted) |
 
 ## ini configuration
 
@@ -58,13 +57,17 @@ ogAppId=<the game's real Steam AppId>
 PluginsFolder=plugins
 GetStubbedLol=false
 
-[PUN]
+[Realtime]
 PhotonAppIdRealtime=<your Realtime-type app's GUID>
+PhotonAppIdVoice=<your Voice-type app's GUID>   ; optional
 ForcedAuthType=0
 ```
 
-- `PhotonAppIdRealtime` — your Photon Realtime app's AppId GUID. Same value used in the static asset edit. The plugin uses it as defense-in-depth: rewrites the `appId` string argument at `OpAuthenticate` wire-send AND in the `SendOperation` params dict, so even if the asset-side edit missed something the runtime sends your GUID.
+- `PhotonAppIdRealtime` — your Photon Realtime app's AppId GUID. The plugin rewrites the `appId` string argument at `OpAuthenticate` wire-send AND in the `SendOperation` params dict, so the game authenticates against your app regardless of what `PhotonServerSettings` has baked in.
+- `PhotonAppIdVoice` — optional. Used for the Voice connection in games that ship voice chat. The plugin classifies peer instances at runtime (first peer observed = Realtime, second distinct peer = Voice) and routes the Voice peer's params[224] to this GUID.
 - `ForcedAuthType=0` — `Custom` (matches the Custom Auth provider on the dashboard). Use `255` for `None` if you want pure anonymous instead.
+
+The plugin also reads the legacy section name `[PUN]` as a fallback, so existing inis from older Setup.bat runs keep working without re-patching.
 
 ## Manual script usage
 
@@ -104,15 +107,15 @@ foreach ($k in 'PhotonNetwork','LoadBalancingClient','LoadBalancingPeer','Server
 
 If `PhotonNetwork` AND `LoadBalancingClient` are both present (and `NetworkRunner` is not), it's PUN. If `NetworkRunner` is present, it's Fusion 2 — use [`photon_fusion`](../photon_fusion/).
 
-If the game has no `il2cpp_data/` folder but has `<Game>_Data\Managed/` with .NET DLLs, it's Mono — use [`photon_pun_mono`](../photon_pun_mono/).
+If the game has no `il2cpp_data/` folder but has `<Game>_Data\Managed/` with .NET DLLs, it's Mono — use [`photon_realtime_mono` (formerly `photon_pun_mono`)](../photon_realtime_mono/).
 
 ## Build
 
 ```powershell
-msbuild plugins\photon_pun\photon_pun_plugin.vcxproj `
+msbuild plugins\photon_realtime\photon_realtime_plugin.vcxproj `
   -p:Configuration=Release -p:Platform=x64 -m
 
-Copy-Item plugins\photon_pun\relbuild\x64\photon_pun.dll `
+Copy-Item plugins\photon_realtime\relbuild\x64\photon_realtime.dll `
   C:\path\to\TheGame\plugins\ -Force
 ```
 
@@ -131,5 +134,5 @@ All hooks installed via MinHook against IL2CPP-resolved native method pointers.
 - Photon free tier has CCU limits (20 CCU).
 - Game updates can break the static edit (re-run `Setup.bat`).
 - Anti-cheat blocks this — don't bother with EAC/BattlEye-protected titles.
-- This plugin only works on IL2CPP-compiled Unity games. For Mono games, use [`photon_pun_mono`](../photon_pun_mono/).
-- For *deeply* obfuscated games whose own UI gates multiplayer on auth state (e.g. Phasmophobia with Beebyte), this plugin won't reach its hooks because the game bails before Photon is contacted.
+- This plugin only works on IL2CPP-compiled Unity games. For Mono games, use [`photon_realtime_mono` (formerly `photon_pun_mono`)](../photon_realtime_mono/).
+- For *deeply* obfuscated games whose own UI gates multiplayer on auth state (e.g. Phasmophobia with Beebyte), this plugin alone isn't enough — pair it with [`unity_auth_bypass`](../unity_auth_bypass/) which NOPs the upstream gate so Photon is actually reached.

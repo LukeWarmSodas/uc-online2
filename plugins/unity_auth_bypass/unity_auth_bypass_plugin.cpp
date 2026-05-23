@@ -31,7 +31,7 @@
 //
 // Confirmed needed for:
 //   - Phasmophobia (AppId 739630, in conjunction with the
-//                   photon_pun plugin)
+//                   photon_realtime plugin)
 //
 // MinHook is statically linked into this DLL.
 // ============================================================
@@ -222,6 +222,76 @@ static bool TryPatchPhasmoSteamAuth()
         return false;
     }
     LOG("[Auth] Phasmo SteamAuth hook installed at %p", hit);
+    return true;
+}
+
+// ============================================================
+// Patch: SteamAuth "Failed to get Steam account information"
+// error gate.
+//
+// Phasmo's obfuscated SteamAuth MoveNext (the async state
+// machine for the sign-in async method) calls an inner check
+// that returns true if the Steam ticket validates. When the
+// check returns false the state machine falls into a branch
+// that loads the "Failed to get Steam account information"
+// string literal and feeds it to the error display path. UI
+// shows the popup and multiplayer never reaches Photon.
+//
+// The check itself is unbypassable without real Steam (it's
+// downstream of GetAuthSessionTicketForWebApi). But the
+// branch that consumes its result is a single je rel32:
+//
+//   xor    ecx, ecx
+//   call   <inner check>
+//   test   al, al
+//   je     <error block>          <-- THIS
+//
+// Replacing the je with 6 NOPs makes the failure branch
+// unreachable. Execution flows into the success path
+// regardless of what the check returned.
+//
+// Located in Phasmo build 23249745 at GameAssembly.dll RVA
+// 0xEAF7CE. Byte-verified before patching.
+// ============================================================
+static bool TryPatchPhasmoSteamAccountGate()
+{
+    HMODULE ga = GetModuleHandleA("GameAssembly.dll");
+    if (!ga) return false;
+
+    // Build-specific RVA. If this drifts, the byte-verify below
+    // catches it -- we don't blindly write.
+    const uintptr_t kPatchRva = 0xEAF7CE;
+    uint8_t* site = (uint8_t*)ga + kPatchRva;
+
+    const uint8_t kExpected[6] = { 0x0F, 0x84, 0xC3, 0x06, 0x00, 0x00 };
+    if (memcmp(site, kExpected, 6) != 0)
+    {
+        char hex[64] = {};
+        int off = 0;
+        for (int i = 0; i < 6 && off < (int)sizeof(hex) - 4; ++i)
+            off += _snprintf_s(hex + off, sizeof(hex) - off, _TRUNCATE,
+                               "%02X ", site[i]);
+        LOG("[Auth] SteamAccountGate: byte mismatch at GameAssembly+0x%llx "
+            "(found: %s) -- build drifted, skipping patch",
+            (unsigned long long)kPatchRva, hex);
+        return false;
+    }
+
+    DWORD oldProt = 0;
+    if (!VirtualProtect(site, 6, PAGE_EXECUTE_READWRITE, &oldProt))
+    {
+        LOG("[Auth] SteamAccountGate: VirtualProtect failed, GLE=%lu",
+            GetLastError());
+        return false;
+    }
+    for (int i = 0; i < 6; ++i) site[i] = 0x90;
+    DWORD tmp = 0;
+    VirtualProtect(site, 6, oldProt, &tmp);
+    FlushInstructionCache(GetCurrentProcess(), site, 6);
+
+    LOG("[Auth] SteamAccountGate: NOPed je at GameAssembly+0x%llx "
+        "-- 'Failed to get Steam account information' branch now unreachable",
+        (unsigned long long)kPatchRva);
     return true;
 }
 
@@ -586,6 +656,7 @@ static DWORD WINAPI WatcherProc(LPVOID)
             // InstallIl2CppHooks so MinHook is initialized and
             // GameAssembly.dll is fully loaded.
             TryPatchPhasmoSteamAuth();
+            TryPatchPhasmoSteamAccountGate();
             return 0;
         }
         Sleep(200);

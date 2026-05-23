@@ -1,8 +1,8 @@
-# photon_pun_mono plugin
+# photon_realtime_mono plugin
 
 **Universal Photon PUN multiplayer redirect for Unity games using the Mono scripting backend.**
 
-Mono-runtime counterpart of [`photon_pun`](../photon_pun/) (which targets IL2CPP builds). Same idea, same hook strategy, different runtime APIs — uses `mono_*` exports from `MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll` instead of `il2cpp_*` from `GameAssembly.dll`.
+Mono-runtime counterpart of [`photon_realtime`](../photon_realtime/) (which targets IL2CPP builds). Same idea, same hook strategy, different runtime APIs — uses `mono_*` exports from `MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll` instead of `il2cpp_*` from `GameAssembly.dll`.
 
 ## Quick terminology
 
@@ -11,7 +11,7 @@ Mono-runtime counterpart of [`photon_pun`](../photon_pun/) (which targets IL2CPP
 - A PUN game's Photon dashboard app is a **Realtime-type** app — PUN was a separate dashboard product type historically but Photon merged it into Realtime years ago.
 - If the game has voice chat (via `PhotonVoice.PUN.dll`), it needs a **second, separate** Photon app of type **`Voice`** with its own AppId GUID.
 
-This plugin targets Mono-compiled Unity games (those with a `MonoBleedingEdge/` folder and `<Game>_Data/Managed/` containing plain .NET DLLs). For IL2CPP-compiled games use [`photon_pun`](../photon_pun/).
+This plugin targets Mono-compiled Unity games (those with a `MonoBleedingEdge/` folder and `<Game>_Data/Managed/` containing plain .NET DLLs). For IL2CPP-compiled games use [`photon_realtime`](../photon_realtime/).
 
 ## Confirmed working
 
@@ -25,10 +25,11 @@ This plugin targets Mono-compiled Unity games (those with a `MonoBleedingEdge/` 
    - One of type **`Realtime`** for the main multiplayer connection.
    - One of type **`Voice`** for voice chat (most PUN-using games need this, including R.E.P.O.).
 2. On each app: **Manage → Authentication → Add Provider → Custom**. Paste the same permissive Cloudflare Worker URL on both. **Uncheck "Reject Clients on Authentication Failure"**. Save.
-3. **Double-click `Setup.bat`** in this folder. It prompts for: game folder → Realtime GUID → Voice GUID → real Steam AppId. It will:
-   - Patch every Photon AppId slot in the game's `resources.assets` (one with your Realtime GUID, the next with your Voice GUID).
-   - Drop `photon_pun_mono.dll` into `<game>\plugins\`.
+3. **Double-click `Setup.bat`** in this folder. It prompts for: game folder → Realtime GUID → Voice GUID (optional) → real Steam AppId. It will:
+   - Drop `photon_realtime_mono.dll` into `<game>\plugins\`.
    - Write a complete `union-crax.ini` at the game root.
+
+   The game's `resources.assets` is **not** modified. The plugin rewrites both AppIds on the wire at runtime, with the ini as the single source of truth. To change a GUID later just edit `union-crax.ini` — no re-patching. (`Set-PhotonAppId.ps1` is still in this folder as an optional static-edit fallback.)
 4. Drop UCOnline2's `steam_api64.dll` into `<game>\<Game>_Data\Plugins\x86_64\` (back up the original first).
 5. Launch the game.
 
@@ -36,12 +37,12 @@ If `Setup.bat` prints `GUID NOT FOUND`, the game isn't a Photon PUN target. The 
 
 ## Why two Photon apps?
 
-R.E.P.O.'s (and most PUN+Voice games') `resources.assets` embeds **two** Photon AppId GUIDs — one for Realtime, one for Voice. Photon validates each AppId server-side against its product type, so:
+R.E.P.O.'s (and most PUN+Voice games') game logic opens **two** Photon connections — one to a Realtime cloud, one to a Voice cloud — each with its own AppId. Photon validates each AppId server-side against its product type, so:
 
-- If you put a Realtime AppId in the Voice slot → Photon rejects with `InvalidAuthentication`.
-- If you leave the Voice slot pointing at the dev's GUID → Photon rejects same way.
+- If you put a Realtime AppId where Voice is expected → Photon rejects with `InvalidAuthentication`.
+- If you leave Voice pointing at the dev's GUID → Photon rejects same way.
 
-You **must** create both apps and use both GUIDs. The script supports this via `-NewAppId` (Realtime, slot 0) and `-NewVoiceAppId` (Voice, slot 1).
+You **must** create both apps. The plugin classifies the two PhotonPeer instances at runtime (first peer = Realtime, second distinct peer = Voice) and routes each one's wire-time AppId rewrite to the appropriate ini key — `PhotonAppIdRealtime` for the Realtime peer, `PhotonAppIdVoice` for the Voice peer.
 
 ## ini configuration
 
@@ -54,15 +55,17 @@ ogAppId=<the game's real Steam AppId>
 PluginsFolder=plugins
 GetStubbedLol=false
 
-[PUN]
+[Realtime]
 PhotonAppIdRealtime=<your Realtime-type app's GUID>
+PhotonAppIdVoice=<your Voice-type app's GUID>   ; optional
 ForcedAuthType=0
 ```
 
-- `PhotonAppIdRealtime` — your Photon Realtime app's AppId GUID. The plugin uses it as the runtime override in `OpAuthenticate` and the `SendOperation` params-dict rewrite.
+- `PhotonAppIdRealtime` — your Photon Realtime app's AppId GUID. The plugin uses it as the runtime override in `OpAuthenticate` and the `SendOperation` params-dict rewrite for the Realtime peer.
+- `PhotonAppIdVoice` — optional. Used for the Voice connection in games that ship voice chat. The plugin classifies peer instances at runtime and routes the Voice peer's `params[224]` to this GUID.
 - `ForcedAuthType=0` — `Custom` (matches the Custom Auth provider type on the dashboard). Use `255` for `None` if you want pure anonymous instead.
 
-The Voice GUID doesn't currently have its own ini key — the asset-side patch handles it. The Voice connection itself doesn't go through any of our runtime hooks (voice runs on a separate connection path; the plugin's job is to make the Realtime connection succeed and let PUN handle voice handshake from there).
+The plugin also reads the legacy section name `[PUN]` as a fallback, so existing inis from older Setup.bat runs keep working.
 
 ## Manual script usage
 
@@ -94,15 +97,15 @@ Get-ChildItem 'C:\path\to\TheGame\<Game>_Data\Managed' -Filter 'Photon*.dll'
 
 Expected to see at minimum: `PhotonRealtime.dll`, `PhotonUnityNetworking.dll`. If you also see `PhotonVoice.dll` / `PhotonVoice.PUN.dll`, the game uses voice and you'll need a Photon Voice app too.
 
-If the game has `il2cpp_data/Metadata/global-metadata.dat` instead of `Managed/*.dll`, it's IL2CPP — use [`photon_pun`](../photon_pun/) instead.
+If the game has `il2cpp_data/Metadata/global-metadata.dat` instead of `Managed/*.dll`, it's IL2CPP — use [`photon_realtime`](../photon_realtime/) instead.
 
 ## Build
 
 ```powershell
-msbuild plugins\photon_pun_mono\photon_pun_mono_plugin.vcxproj `
+msbuild plugins\photon_realtime_mono\photon_realtime_mono_plugin.vcxproj `
   -p:Configuration=Release -p:Platform=x64 -m
 
-Copy-Item plugins\photon_pun_mono\relbuild\x64\photon_pun_mono.dll `
+Copy-Item plugins\photon_realtime_mono\relbuild\x64\photon_realtime_mono.dll `
   C:\path\to\TheGame\plugins\ -Force
 ```
 
@@ -116,6 +119,6 @@ Copy-Item plugins\photon_pun_mono\relbuild\x64\photon_pun_mono.dll `
 
 ## Limitations
 
-- Same general caveats as `photon_pun`: free-tier Photon CCU limits; game updates can break the static asset edit; anti-cheat blocks this; Cloudflare Worker accepts every auth request (don't reuse for real projects).
-- Mono-only — for IL2CPP games use [`photon_pun`](../photon_pun/).
+- Same general caveats as `photon_realtime`: free-tier Photon CCU limits; anti-cheat blocks this; Cloudflare Worker accepts every auth request (don't reuse for real projects).
+- Mono-only — for IL2CPP games use [`photon_realtime`](../photon_realtime/).
 - Requires creating **two** Photon apps (Realtime + Voice) for any game that uses PUN Voice. There's no way around this — Photon validates AppId type server-side.
