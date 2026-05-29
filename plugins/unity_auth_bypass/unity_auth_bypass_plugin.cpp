@@ -31,7 +31,8 @@
 //
 // Confirmed needed for:
 //   - Phasmophobia (AppId 739630, in conjunction with the
-//                   photon_realtime plugin)
+//                   photon_universal plugin -- which also bundles
+//                   an equivalent Phasmo gate NOP)
 //
 // MinHook is statically linked into this DLL.
 // ============================================================
