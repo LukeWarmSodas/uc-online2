@@ -232,10 +232,16 @@ S_API ESteamAPIInitResult S_CALLTYPE SteamInternal_SteamAPI_Init(const char* psz
 			if (g_ServerModule) hMod = g_ServerModule;
 
 			g_pfnIsKnownInterface = (Fn_IsKnownInterface)GetProcAddress(hMod, "Steam_IsKnownInterface");
+			// Steam_IsKnownInterface is optional. If it's absent
+			// (some older steamclient builds don't expose it), don't
+			// fail init -- just skip the validation. Steamworks.NET
+			// 20.x passes pszVersions on every init and would
+			// otherwise hard-fail here on perfectly viable Steam
+			// installs.
 			if (!g_pfnIsKnownInterface)
 			{
-				SteamAPI_Shutdown();
-				return k_ESteamAPIInitResult_VersionMismatch;
+				UCOLOG("[UCOnline2] Steam_IsKnownInterface not exported by steamclient; "
+				       "skipping interface-version pre-validation\r\n");
 			}
 		}
 
@@ -274,6 +280,47 @@ S_API ESteamAPIInitResult S_CALLTYPE SteamInternal_SteamAPI_Init(const char* psz
 
 			if (g_bClientReady)
 			{
+				// Diagnostic: probe each interface Steamworks.NET 20.x
+				// CSteamAPIContext.Init() asks for, log any nullptr.
+				// Identifies which lookup makes the game-side init fail.
+				struct IfaceProbe { const char* name; void* result; };
+				ISteamClient* sc = g_pSteamClient;
+				IfaceProbe probes[] = {
+					{ "SteamUser023",                          sc->GetISteamUser(g_ClientUser, g_ClientPipe, "SteamUser023") },
+					{ "SteamFriends018",                       sc->GetISteamFriends(g_ClientUser, g_ClientPipe, "SteamFriends018") },
+					{ "SteamUtils010",                         sc->GetISteamUtils(g_ClientPipe, "SteamUtils010") },
+					{ "SteamMatchMaking009",                   sc->GetISteamMatchmaking(g_ClientUser, g_ClientPipe, "SteamMatchMaking009") },
+					{ "SteamMatchMakingServers002",            sc->GetISteamMatchmakingServers(g_ClientUser, g_ClientPipe, "SteamMatchMakingServers002") },
+					{ "STEAMUSERSTATS_INTERFACE_VERSION013",   sc->GetISteamUserStats(g_ClientUser, g_ClientPipe, "STEAMUSERSTATS_INTERFACE_VERSION013") },
+					{ "STEAMAPPS_INTERFACE_VERSION008",        sc->GetISteamApps(g_ClientUser, g_ClientPipe, "STEAMAPPS_INTERFACE_VERSION008") },
+					{ "SteamNetworking006",                    sc->GetISteamNetworking(g_ClientUser, g_ClientPipe, "SteamNetworking006") },
+					{ "STEAMREMOTESTORAGE_INTERFACE_VERSION016", sc->GetISteamRemoteStorage(g_ClientUser, g_ClientPipe, "STEAMREMOTESTORAGE_INTERFACE_VERSION016") },
+					{ "STEAMSCREENSHOTS_INTERFACE_VERSION003", sc->GetISteamScreenshots(g_ClientUser, g_ClientPipe, "STEAMSCREENSHOTS_INTERFACE_VERSION003") },
+					{ "SteamMatchGameSearch001",               sc->GetISteamGenericInterface(g_ClientUser, g_ClientPipe, "SteamMatchGameSearch001") },
+					{ "STEAMHTTP_INTERFACE_VERSION003",        sc->GetISteamHTTP(g_ClientUser, g_ClientPipe, "STEAMHTTP_INTERFACE_VERSION003") },
+					{ "STEAMUGC_INTERFACE_VERSION021",         sc->GetISteamUGC(g_ClientUser, g_ClientPipe, "STEAMUGC_INTERFACE_VERSION021") },
+					{ "STEAMMUSIC_INTERFACE_VERSION001",       sc->GetISteamMusic(g_ClientUser, g_ClientPipe, "STEAMMUSIC_INTERFACE_VERSION001") },
+					{ "STEAMMUSICREMOTE_INTERFACE_VERSION001", sc->GetISteamGenericInterface(g_ClientUser, g_ClientPipe, "STEAMMUSICREMOTE_INTERFACE_VERSION001") },
+					{ "STEAMHTMLSURFACE_INTERFACE_VERSION_005",sc->GetISteamHTMLSurface(g_ClientUser, g_ClientPipe, "STEAMHTMLSURFACE_INTERFACE_VERSION_005") },
+					{ "STEAMINVENTORY_INTERFACE_V003",         sc->GetISteamInventory(g_ClientUser, g_ClientPipe, "STEAMINVENTORY_INTERFACE_V003") },
+					{ "STEAMVIDEO_INTERFACE_V007",             sc->GetISteamVideo(g_ClientUser, g_ClientPipe, "STEAMVIDEO_INTERFACE_V007") },
+					{ "STEAMPARENTALSETTINGS_INTERFACE_VERSION001", sc->GetISteamParentalSettings(g_ClientUser, g_ClientPipe, "STEAMPARENTALSETTINGS_INTERFACE_VERSION001") },
+					{ "SteamInput006",                         sc->GetISteamInput(g_ClientUser, g_ClientPipe, "SteamInput006") },
+					{ "SteamParties002",                       sc->GetISteamParties(g_ClientUser, g_ClientPipe, "SteamParties002") },
+					{ "STEAMREMOTEPLAY_INTERFACE_VERSION003",  sc->GetISteamRemotePlay(g_ClientUser, g_ClientPipe, "STEAMREMOTEPLAY_INTERFACE_VERSION003") },
+					// Final 4: Steamworks.NET 20.x CSteamAPIContext.Init()
+					// also probes these via FindOrCreateUserInterface.
+					// If any returns null, managed Init() returns false.
+					{ "SteamNetworkingUtils004",               sc->GetISteamGenericInterface(g_ClientUser, g_ClientPipe, "SteamNetworkingUtils004") },
+					{ "SteamNetworkingSockets012",             sc->GetISteamGenericInterface(g_ClientUser, g_ClientPipe, "SteamNetworkingSockets012") },
+					{ "SteamNetworkingMessages002",            sc->GetISteamGenericInterface(g_ClientUser, g_ClientPipe, "SteamNetworkingMessages002") },
+					{ "STEAMTIMELINE_INTERFACE_V004",          sc->GetISteamGenericInterface(g_ClientUser, g_ClientPipe, "STEAMTIMELINE_INTERFACE_V004") },
+				};
+				for (size_t i = 0; i < sizeof(probes)/sizeof(probes[0]); ++i) {
+					if (probes[i].result == nullptr)
+						UCOLOG("[UCOnline2] probe FAIL: %s -> nullptr\r\n", probes[i].name);
+				}
+
 				InstallSteamSpoofHooks();
 
 				// Build the plugin context now that Steam interfaces
