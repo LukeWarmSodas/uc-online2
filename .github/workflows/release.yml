@@ -83,6 +83,13 @@ jobs:
             Where-Object { ($_.FullName -replace '\\','/') -match '/relbuild/x64/' } |
             ForEach-Object { Copy-Item $_.FullName "$packageRootrel/plugins/$($_.Name)" -Force }
 
+          # Photon auto-patcher: ship patch.bat + a copy of the plugin DLL at the
+          # package root so users can drop a game folder onto it from the release.
+          if (Test-Path "patch.bat") {
+            Copy-Item "patch.bat" "$packageRootrel/patch.bat" -Force
+            Copy-Item "plugins/photon_universal/relbuild/x64/photon_universal.dll" "$packageRootrel/photon_universal.dll" -Force
+          }
+
           if (Test-Path $archivePathrel) {
             Remove-Item $archivePathrel -Force
           }

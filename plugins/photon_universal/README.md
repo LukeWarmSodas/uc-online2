@@ -26,6 +26,7 @@ At init the plugin detects the Unity backend (Mono vs IL2CPP) by which runtime D
 | Game | Steam AppId | Backend / flavor | Notes |
 |---|---|---|---|
 | **R.E.P.O.** | 3241660 | Mono · Realtime/PUN + Voice | Needs **two** Photon apps (one Realtime + one Voice). Voice slot is mandatory — Photon's NameServer rejects the connection if the Voice AppId still holds the dev's GUID. |
+| **PEAK** | 3527290 | Mono · Realtime/PUN + Voice | Same shape as R.E.P.O. — PUN + proximity-chat Voice, so both a Realtime and a Voice app are required. Steam-friends-invite co-op. |
 | **Phasmophobia** | 739630 | IL2CPP · Realtime/PUN | The built-in Phasmo SteamAuth gate NOP fires automatically (byte signature in `GameAssembly.dll`), NOPing the Beebyte-obfuscated ticket-verify gate that would otherwise block before Photon is reached. |
 | **Outbound** | 2681030 | IL2CPP · Fusion 2 | First Fusion target; works asset-patch-free at runtime. |
 
