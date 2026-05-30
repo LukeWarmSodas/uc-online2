@@ -88,7 +88,7 @@ static void WriteAppIDFile()
 
 S_API HSteamPipe S_CALLTYPE GetHSteamPipe()
 {
-	UCOLOG("[UCOnline2] GetHSteamPipe\r\n");
+	// Hot path (called per-frame for callback dispatch) -- not logged to avoid flooding the log.
 	return g_ClientPipe;
 }
 
@@ -100,7 +100,7 @@ S_API HSteamUser S_CALLTYPE GetHSteamUser()
 
 S_API HSteamPipe S_CALLTYPE SteamAPI_GetHSteamPipe()
 {
-	UCOLOG("[UCOnline2] SteamAPI_GetHSteamPipe\r\n");
+	// Hot path (called per-frame for callback dispatch) -- not logged to avoid flooding the log.
 	return g_ClientPipe;
 }
 
