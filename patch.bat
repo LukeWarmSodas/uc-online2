@@ -73,21 +73,19 @@ if exist "%DATA%\Managed" (
   goto :end
 )
 
-if not defined FLAVOR (
-  echo.
-  echo [RESULT] No Photon detected ^(backend: %BACKEND%^).
-  echo   This game is not a photon_universal target. Nothing was changed.
-  echo   If its multiplayer is pure Steam P2P, try it bare with no plugin first.
-  goto :end
-)
-
 echo.
-echo [DETECTED] Backend=%BACKEND%  Photon flavor=%FLAVOR%
-if defined HAS_VOICE echo            Photon Voice present ^(a separate Voice app is required^).
+if not defined FLAVOR (
+  echo [DETECTED] Backend=%BACKEND%  Photon: none
+  echo   No Photon found. Writing a base union-crax.ini only ^(no plugin^).
+  echo   If multiplayer is pure Steam P2P this is all you need; try it bare.
+) else (
+  echo [DETECTED] Backend=%BACKEND%  Photon flavor=%FLAVOR%
+  if defined HAS_VOICE echo            Photon Voice present ^(a separate Voice app is required^).
+)
 echo.
 
 rem ============================================================
-rem  Gather config
+rem  Gather config -- AppId is always needed
 rem ============================================================
 set "OGAPPID="
 set /p "OGAPPID=Real Steam AppId of the game (the ogAppId): "
@@ -99,6 +97,7 @@ set "RTGUID="
 set "VOICEGUID="
 set "FUSIONGUID="
 
+if not defined FLAVOR goto :write_ini
 if /i "%FLAVOR%"=="Fusion" goto :ask_fusion
 
 :ask_realtime
@@ -127,6 +126,7 @@ set "INI=%GAME%\union-crax.ini"
 >> "%INI%" echo ogAppId=%OGAPPID%
 >> "%INI%" echo PluginsFolder=plugins
 >> "%INI%" echo GetStubbedLol=false
+if not defined FLAVOR goto :wrote_ini
 >> "%INI%" echo(
 if /i "%FLAVOR%"=="Fusion" goto :write_fusion
 >> "%INI%" echo [Realtime]
@@ -144,8 +144,9 @@ goto :wrote_ini
 echo [OK] Wrote %INI%
 
 rem ============================================================
-rem  Deploy the plugin DLL
+rem  Deploy the plugin DLL (Photon games only)
 rem ============================================================
+if not defined FLAVOR goto :done_nophoton
 if not exist "%GAME%\plugins\" mkdir "%GAME%\plugins"
 copy /y "%PLUGIN_DLL%" "%GAME%\plugins\photon_universal.dll" >nul
 if errorlevel 1 echo [ERROR] Failed to copy plugin DLL.& goto :end
@@ -153,7 +154,7 @@ echo [OK] Copied photon_universal.dll to %GAME%\plugins\
 
 echo.
 echo ============================================================
-echo  DONE.
+echo  DONE ^(Photon: %FLAVOR%^).
 echo  Still to do yourself:
 echo   1. Put UCOnline2's steam_api64.dll in %DATA%\Plugins\x86_64\ (back up the original).
 echo   2. On each Photon app: Manage -^> Authentication -^> Add Provider -^> Custom,
@@ -161,6 +162,17 @@ echo      paste your permissive Cloudflare Worker URL, UNCHECK "Reject Clients
 echo      on Authentication Failure", Save.
 if defined HAS_VOICE echo   3. This game uses Photon Voice - you MUST create a Voice-type app too.
 echo  Then launch. Tail %%TEMP%%\uc_online2.log for [Realtime]/[Fusion] lines.
+echo ============================================================
+goto :end
+
+:done_nophoton
+echo.
+echo ============================================================
+echo  DONE ^(base ini only, no Photon plugin^).
+echo  Still to do yourself:
+echo   1. Put UCOnline2's steam_api64.dll in %DATA%\Plugins\x86_64\ (back up the original).
+echo   2. Launch the game. If multiplayer is pure Steam P2P it should work bare.
+echo      If it needs EOS/Photon/etc, this game needs a different plugin.
 echo ============================================================
 
 :end
