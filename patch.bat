@@ -93,26 +93,34 @@ set "OGAPPID="
 set /p "OGAPPID=Real Steam AppId of the game (the ogAppId): "
 if not defined OGAPPID echo [ERROR] AppId is required.& goto :end
 
+rem NOTE: `set /p` must NOT be inside a ( ) block -- it misbehaves there. Each
+rem prompt is at top level, dispatched by goto, so reads are reliable.
 set "RTGUID="
 set "VOICEGUID="
 set "FUSIONGUID="
 
-if /i "%FLAVOR%"=="Fusion" (
-  set /p "FUSIONGUID=Your Photon FUSION app GUID: "
-  if not defined FUSIONGUID echo [ERROR] Fusion GUID is required.& goto :end
-) else (
-  set /p "RTGUID=Your Photon REALTIME app GUID: "
-  if not defined RTGUID echo [ERROR] Realtime GUID is required.& goto :end
-  if defined HAS_VOICE (
-    set /p "VOICEGUID=Your Photon VOICE app GUID (required for this game): "
-  ) else (
-    set /p "VOICEGUID=Photon VOICE app GUID (optional, press Enter to skip): "
-  )
-)
+if /i "%FLAVOR%"=="Fusion" goto :ask_fusion
+
+:ask_realtime
+set /p "RTGUID=Your Photon REALTIME app GUID: "
+if not defined RTGUID echo [ERROR] Realtime GUID is required.& goto :end
+if defined HAS_VOICE goto :ask_voice_required
+set /p "VOICEGUID=Photon VOICE app GUID (optional, press Enter to skip): "
+goto :write_ini
+
+:ask_voice_required
+set /p "VOICEGUID=Your Photon VOICE app GUID (required for this game): "
+goto :write_ini
+
+:ask_fusion
+set /p "FUSIONGUID=Your Photon FUSION app GUID: "
+if not defined FUSIONGUID echo [ERROR] Fusion GUID is required.& goto :end
+goto :write_ini
 
 rem ============================================================
 rem  Write union-crax.ini  (sequential appends -- robust)
 rem ============================================================
+:write_ini
 set "INI=%GAME%\union-crax.ini"
 > "%INI%" echo [Settings]
 >> "%INI%" echo AppId=480
@@ -120,16 +128,19 @@ set "INI=%GAME%\union-crax.ini"
 >> "%INI%" echo PluginsFolder=plugins
 >> "%INI%" echo GetStubbedLol=false
 >> "%INI%" echo(
-if /i "%FLAVOR%"=="Fusion" (
-  >> "%INI%" echo [Fusion]
-  >> "%INI%" echo PhotonAppIdFusion=%FUSIONGUID%
-  >> "%INI%" echo ForcedAuthType=0
-) else (
-  >> "%INI%" echo [Realtime]
-  >> "%INI%" echo PhotonAppIdRealtime=%RTGUID%
-  if defined VOICEGUID >> "%INI%" echo PhotonAppIdVoice=%VOICEGUID%
-  >> "%INI%" echo ForcedAuthType=0
-)
+if /i "%FLAVOR%"=="Fusion" goto :write_fusion
+>> "%INI%" echo [Realtime]
+>> "%INI%" echo PhotonAppIdRealtime=%RTGUID%
+if defined VOICEGUID >> "%INI%" echo PhotonAppIdVoice=%VOICEGUID%
+>> "%INI%" echo ForcedAuthType=0
+goto :wrote_ini
+
+:write_fusion
+>> "%INI%" echo [Fusion]
+>> "%INI%" echo PhotonAppIdFusion=%FUSIONGUID%
+>> "%INI%" echo ForcedAuthType=0
+
+:wrote_ini
 echo [OK] Wrote %INI%
 
 rem ============================================================
