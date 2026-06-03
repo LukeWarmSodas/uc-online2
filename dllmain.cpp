@@ -5,12 +5,14 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <vector>
 
 #define STEAM_API_EXPORTS
 
 #include "include/sdk/steam_api.h"
 #include "include/sdk/steamclientpublic.h"
 #include "include/sdk/steam_gameserver.h"
+#include "include/sdk/steamtypes.h"
 
 S_API ISteamClient* g_pSteamClientGameServer = nullptr;
 
@@ -349,6 +351,9 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 		{
 			SteamStub_Init();
 		}
+
+		std::vector<uint32> unlockedDLC = s_PluginLoader.GetUnlockDLCAppIds();
+		CSteamAppsStub::SetUnlockedDLCAppIds(unlockedDLC);
 	}
 	else if (dwReason == DLL_PROCESS_DETACH)
 	{

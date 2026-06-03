@@ -10,6 +10,7 @@
 #pragma once
 
 #include <Windows.h>
+#include <vector>
 
 #define STEAM_API_EXPORTS
 #include "include/sdk/steam_api.h"
@@ -252,15 +253,30 @@ extern CSteamAPIContext g_ClientCtx;
 
 class CSteamAppsStub : public ISteamApps
 {
+private:
+    static std::vector<uint32> s_UnlockedDLCAppIds;
+
 public:
+    static void SetUnlockedDLCAppIds(const std::vector<uint32>& appIds) { s_UnlockedDLCAppIds = appIds; }
+
     virtual bool BIsSubscribed() override { return true; }
     virtual bool BIsLowViolence() override { return true; }
     virtual bool BIsCybercafe() override { return false; }
     virtual bool BIsVACBanned() override { return false; }
     virtual const char *GetCurrentGameLanguage() override { return "english"; }
     virtual const char *GetAvailableGameLanguages() override { return "english"; }
-    virtual bool BIsSubscribedApp(AppId_t appID) override { return true; }
-    virtual bool BIsDlcInstalled(AppId_t appID) override { return true; }
+    virtual bool BIsSubscribedApp(AppId_t appID) override {
+        for (uint32 id : s_UnlockedDLCAppIds) {
+            if (id == (uint32)appID) return true;
+        }
+        return true;
+    }
+    virtual bool BIsDlcInstalled(AppId_t appID) override {
+        for (uint32 id : s_UnlockedDLCAppIds) {
+            if (id == (uint32)appID) return true;
+        }
+        return true;
+    }
     virtual uint32 GetEarliestPurchaseUnixTime(AppId_t nAppID) override { return 0; }
     virtual bool BIsSubscribedFromFreeWeekend() override { return false; }
     virtual int GetDLCCount() override { return 0; }
@@ -296,6 +312,8 @@ public:
 private:
     static CSteamAppsStub s_AppsStub;
 };
+
+std::vector<uint32> CSteamAppsStub::s_UnlockedDLCAppIds;
 
 CSteamAppsStub s_AppsStub;
 

@@ -63,20 +63,48 @@ public:
  		return (id == 0) ? 480 : id;
  	}
 
- 	uint32 GetOgAppId()
- 	{
- 		if (m_IniPath[0] == '\0')
- 	        return 0;
+uint32 GetOgAppId()
+  	{
+  		if (m_IniPath[0] == '\0')
+  	        return 0;
 
- 		char buf[16] = { 0 };
- 		GetPrivateProfileStringA("Settings", "ogAppId", "", buf, sizeof(buf), m_IniPath);
+  		char buf[16] = { 0 };
+  		GetPrivateProfileStringA("Settings", "ogAppId", "", buf, sizeof(buf), m_IniPath);
 
- 		if (buf[0] == '\0')
- 			return 0;
+  		if (buf[0] == '\0')
+  			return 0;
 
- 		uint32 id = (uint32)strtoul(buf, nullptr, 10);
- 		return id;
- 	}
+  		uint32 id = (uint32)strtoul(buf, nullptr, 10);
+  		return id;
+  	}
+
+	std::vector<uint32> GetUnlockDLCAppIds()
+	{
+		std::vector<uint32> appIds;
+		if (m_IniPath[0] == '\0')
+			return appIds;
+
+		char buf[1024] = { 0 };
+		GetPrivateProfileStringA("Settings", "UnlockDLC", "", buf, sizeof(buf), m_IniPath);
+
+		if (buf[0] == '\0')
+			return appIds;
+
+		char* token = strtok(buf, ",");
+		while (token != nullptr)
+		{
+			while (*token == ' ' || *token == '\t') token++;
+			if (token[0] != '\0')
+			{
+				uint32 id = (uint32)strtoul(token, nullptr, 10);
+				if (id != 0)
+					appIds.push_back(id);
+			}
+			token = strtok(nullptr, ",");
+		}
+
+		return appIds;
+	}
 
 	bool GetSteamStubEnabled()
 	{

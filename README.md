@@ -31,6 +31,18 @@ AppId=480
 ogAppId=220 # Half-life 2
 PluginsFolder=plugins
 GetStubbedLol=false
+UnlockDLC=123,456,789 # Comma-separated list of DLC AppIds to unlock
+```
+
+## Unlock DLC
+
+The `UnlockDLC` setting allows you to unlock specific DLC by their AppIds. List the AppIds of the DLC you want to unlock, separated by commas. This works the same as `BIsSubscribedApp` and `BIsDlcInstalled` returning true for those specific AppIds, while still returning true for the base game and other DLC by default.
+
+Example:
+```ini
+[Settings]
+AppId=480
+UnlockDLC=211,212,213,218  # Example DLC AppIds for Half-Life 2
 ```
 
 ## Plugin Loader / Injector
