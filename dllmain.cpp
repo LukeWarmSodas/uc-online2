@@ -354,6 +354,12 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 
 		std::vector<uint32> unlockedDLC = s_PluginLoader.GetUnlockDLCAppIds();
 		CSteamAppsStub::SetUnlockedDLCAppIds(unlockedDLC);
+
+		if (s_PluginLoader.GetEmulateTicketEnabled()) {
+			uint32 emulatedAppId = s_PluginLoader.GetOgAppId();
+			if (emulatedAppId == 0) emulatedAppId = s_PluginLoader.GetAppId();
+			CSteamUserStub::SetEmulatedApp(emulatedAppId);
+		}
 	}
 	else if (dwReason == DLL_PROCESS_DETACH)
 	{

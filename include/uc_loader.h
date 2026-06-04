@@ -106,6 +106,17 @@ uint32 GetOgAppId()
 		return appIds;
 	}
 
+	bool GetEmulateTicketEnabled()
+	{
+		if (m_IniPath[0] == '\0')
+			return false;
+
+		char buf[8] = { 0 };
+		GetPrivateProfileStringA("Settings", "EmulateTicket", "false", buf, sizeof(buf), m_IniPath);
+
+		return (_stricmp(buf, "true") == 0 || _stricmp(buf, "1") == 0 || _stricmp(buf, "yes") == 0);
+	}
+
 	bool GetSteamStubEnabled()
 	{
 		if (m_IniPath[0] == '\0')

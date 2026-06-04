@@ -174,6 +174,8 @@ S_API ISteamUGC* S_CALLTYPE SteamUGC()
 S_API ISteamUser* S_CALLTYPE SteamUser()
 {
 	UCOLOG("[UCOnline2] SteamUser\r\n");
+	if (CSteamUserStub::IsEmulateTicketEnabled())
+		return &s_UserStub;
 	return g_bClientReady ? g_ClientCtx.SteamUser() : nullptr;
 }
 

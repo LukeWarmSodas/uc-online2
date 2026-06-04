@@ -22,6 +22,9 @@ const uint32 k_unServerFlagNone    = 0x00;
 const uint32 k_unServerFlagSecure  = 0x01;
 const uint32 k_unServerFlagPrivate = 0x02;
 
+class CSteamAPIContext;
+extern HSteamUser g_ClientUser;
+
 class ISteamGameSearch 
 { 
 public: 
@@ -64,6 +67,72 @@ public:
 };
 
 static CSteamGameSearchStub s_GameSearchStub;
+
+class CSteamUserStub : public ISteamUser
+{
+public:
+    static bool s_bEmulateTicket;
+    static uint32 s_unEmulatedAppId;
+    static std::vector<uint8_t> s_EncryptedTicket;
+
+    static void SetEmulatedApp(uint32 unAppId) { s_unEmulatedAppId = unAppId; s_bEmulateTicket = true; }
+    static bool IsEmulateTicketEnabled() { return s_bEmulateTicket; }
+
+    virtual HSteamUser GetHSteamUser() override { return g_ClientUser; }
+    virtual bool BLoggedOn() override { return true; }
+    virtual CSteamID GetSteamID() override { return k_steamIDNil; }
+    virtual int InitiateGameConnection_DEPRECATED(void*, int, CSteamID, uint32, uint16, bool) override { return 0; }
+    virtual void TerminateGameConnection_DEPRECATED(uint32, uint16) override {}
+    virtual void TrackAppUsageEvent(CGameID, int, const char*) override {}
+    virtual bool GetUserDataFolder(char*, int) override { return false; }
+    virtual void StartVoiceRecording() override {}
+    virtual void StopVoiceRecording() override {}
+    virtual EVoiceResult GetAvailableVoice(uint32 *pcbCompressed, uint32 *pcbUncompressed_Deprecated = 0, uint32 nUncompressedVoiceDesiredSampleRate_Deprecated = 0) override { return k_EVoiceResultNotRecording; }
+    virtual EVoiceResult GetVoice(bool bWantCompressed, void *pDestBuffer, uint32 cbDestBufferSize, uint32 *nBytesWritten, bool bWantUncompressed_Deprecated = false, void *pUncompressedDestBuffer_Deprecated = 0, uint32 cbUncompressedDestBufferSize_Deprecated = 0, uint32 *nUncompressBytesWritten_Deprecated = 0, uint32 nUncompressedVoiceDesiredSampleRate_Deprecated = 0) override { return k_EVoiceResultNotRecording; }
+    virtual EVoiceResult DecompressVoice(const void*, uint32, void*, uint32, uint32*, uint32) override { return k_EVoiceResultNotRecording; }
+    virtual uint32 GetVoiceOptimalSampleRate() override { return 0; }
+    virtual HAuthTicket GetAuthSessionTicket(void*, int, uint32*, const SteamNetworkingIdentity*) override { return k_HAuthTicketInvalid; }
+    virtual HAuthTicket GetAuthTicketForWebApi(const char*) override { return k_HAuthTicketInvalid; }
+    virtual EBeginAuthSessionResult BeginAuthSession(const void*, int, CSteamID) override { return k_EBeginAuthSessionResultInvalidTicket; }
+    virtual void EndAuthSession(CSteamID) override {}
+    virtual void CancelAuthTicket(HAuthTicket) override {}
+    virtual EUserHasLicenseForAppResult UserHasLicenseForApp(CSteamID, AppId_t appID) override {
+        if (s_bEmulateTicket && (uint32)appID == s_unEmulatedAppId)
+            return k_EUserHasLicenseResultHasLicense;
+        return k_EUserHasLicenseResultDoesNotHaveLicense;
+    }
+    virtual bool BIsBehindNAT() override { return false; }
+    virtual void AdvertiseGame(CSteamID, uint32, uint16) override {}
+    virtual SteamAPICall_t RequestEncryptedAppTicket(void* pDataToInclude, int cbDataToInclude) override {
+        s_EncryptedTicket.clear();
+        s_EncryptedTicket.resize(128);
+        uint32 ticketSize = (uint32)GenerateFakeTicket(s_EncryptedTicket.data(), (uint32)s_EncryptedTicket.size(), pDataToInclude, cbDataToInclude);
+        s_EncryptedTicket.resize(ticketSize);
+        return k_uAPICallInvalid;
+    }
+    virtual bool GetEncryptedAppTicket(void* pTicket, int cbMaxTicket, uint32* pcbTicket) override {
+        if (!pcbTicket) return false;
+        *pcbTicket = (uint32)s_EncryptedTicket.size();
+        if ((int)*pcbTicket > cbMaxTicket) return false;
+        if (pTicket && s_EncryptedTicket.size() > 0) {
+            memcpy(pTicket, s_EncryptedTicket.data(), s_EncryptedTicket.size());
+        }
+        return true;
+    }
+    virtual int GetGameBadgeLevel(int, bool) override { return 0; }
+    virtual int GetPlayerSteamLevel() override { return 0; }
+    virtual SteamAPICall_t RequestStoreAuthURL(const char*) override { return k_uAPICallInvalid; }
+    virtual bool BIsPhoneVerified() override { return false; }
+    virtual bool BIsTwoFactorEnabled() override { return false; }
+    virtual bool BIsPhoneIdentifying() override { return false; }
+    virtual bool BIsPhoneRequiringVerification() override { return false; }
+    virtual SteamAPICall_t GetMarketEligibility() override { return k_uAPICallInvalid; }
+    virtual SteamAPICall_t GetDurationControl() override { return k_uAPICallInvalid; }
+    virtual bool BSetDurationControlOnlineState(EDurationControlOnlineState) override { return false; }
+
+private:
+    static uint32 GenerateFakeTicket(uint8_t* pTicket, uint32 cbMaxTicket, void* pDataToInclude, int cbDataToInclude);
+};
 
 // music
 class ISteamMusicRemote
@@ -253,12 +322,9 @@ extern CSteamAPIContext g_ClientCtx;
 
 class CSteamAppsStub : public ISteamApps
 {
-private:
-    static std::vector<uint32> s_UnlockedDLCAppIds;
-
 public:
+    static std::vector<uint32> s_UnlockedDLCAppIds;
     static void SetUnlockedDLCAppIds(const std::vector<uint32>& appIds) { s_UnlockedDLCAppIds = appIds; }
-
     virtual bool BIsSubscribed() override { return true; }
     virtual bool BIsLowViolence() override { return true; }
     virtual bool BIsCybercafe() override { return false; }
@@ -314,8 +380,38 @@ private:
 };
 
 std::vector<uint32> CSteamAppsStub::s_UnlockedDLCAppIds;
-
+bool CSteamUserStub::s_bEmulateTicket = false;
+uint32 CSteamUserStub::s_unEmulatedAppId = 0;
+std::vector<uint8_t> CSteamUserStub::s_EncryptedTicket;
 CSteamAppsStub s_AppsStub;
+CSteamUserStub s_UserStub;
+
+inline uint32 CSteamUserStub::GenerateFakeTicket(uint8_t* pTicket, uint32 cbMaxTicket, void* pDataToInclude, int cbDataToInclude)
+{
+    if (cbMaxTicket < 64) return 0;
+    
+    memset(pTicket, 0, cbMaxTicket);
+    
+    pTicket[0] = 'S';
+    pTicket[1] = 'T';
+    pTicket[2] = 'E';
+    pTicket[3] = 'A';
+    pTicket[4] = 'M';
+    
+    *reinterpret_cast<uint32_t*>(pTicket + 4) = s_unEmulatedAppId;
+    
+    *reinterpret_cast<uint32_t*>(pTicket + 8) = GetTickCount();
+    
+    uint32 dataOffset = 16;
+    if (pDataToInclude && cbDataToInclude > 0 && dataOffset + cbDataToInclude < cbMaxTicket) {
+        memcpy(pTicket + dataOffset, pDataToInclude, cbDataToInclude);
+        dataOffset += cbDataToInclude;
+    }
+    
+    *reinterpret_cast<uint32_t*>(pTicket + 12) = dataOffset;
+    
+    return dataOffset;
+}
 
 class CSteamGameServerAPIContext
 {
