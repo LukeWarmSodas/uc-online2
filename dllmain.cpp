@@ -898,8 +898,7 @@ static DWORD WINAPI SteamStub_HookGetTickCount(void)
 	uint8_t* found = SteamStub_FindSignature(start, end, STEAM_STUB_SIGNATURE, sizeof(STEAM_STUB_SIGNATURE));
 	if (found)
 	{
-		found[6] = 0x90;
-		found[7] = 0xE9;
+		found[7] = 0x85;
 
 		uint32_t count = g_SteamStubCount.fetch_add(1, std::memory_order_seq_cst) + 1;
 		if (count >= STEAM_STUB_MAX_COUNT)
