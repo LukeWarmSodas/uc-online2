@@ -31,6 +31,34 @@ AppId=480
 ogAppId=220 # Half-life 2
 PluginsFolder=plugins
 GetStubbedLol=false
+UnlockDLC=123,456,789 # Comma-separated list of DLC AppIds to unlock
+EmulateTicket=true  # Enable ticket emulation using ogAppId or AppId
+```
+
+## Unlock DLC
+
+The `UnlockDLC` setting allows you to unlock specific DLC by their AppIds. List the AppIds of the DLC you want to unlock, separated by commas. This works the same as `BIsSubscribedApp` and `BIsDlcInstalled` returning true for those specific AppIds, while still returning true for the base game and other DLC by default.
+
+Example:
+```ini
+[Settings]
+AppId=480
+UnlockDLC=211,212,213,218  # Example DLC AppIds for Half-Life 2
+```
+
+## Emulate Encrypted App Ticket
+
+The `EmulateTicket` setting enables encrypted app ticket emulation for multiplayer authentication. When enabled, it uses the `ogAppId` setting (or `AppId` if `ogAppId` is not set) to respond to `UserHasLicenseForApp` checks and provide fake encrypted app tickets via `GetEncryptedAppTicket`.
+
+I really didn't know how to actually go about this, sorry - I used AI to try and finish what I had gotten through with it. I don't know how OFME utilizes it, but I can assume it actually is a ticket emulation system which is what I tried to make. But, I don't want it to _not_ work due to it being emulated, or too emulated, if this makes sense at all. I don't want to deviate too much and have this not work at all.
+Speaking of which, I can't say for certain if this function would actually work or not, I will rely on the community to find out about that from testing for me. Sorry to throw that on y'all like this. ^^;
+
+Example:
+```ini
+[Settings]
+AppId=480
+ogAppId=440  # Used for ticket emulation (falls back to AppId if not set)
+EmulateTicket=true
 ```
 
 ## Plugin Loader / Injector

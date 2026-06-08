@@ -6,12 +6,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <vector>
 
 #define STEAM_API_EXPORTS
 
 #include "include/sdk/steam_api.h"
 #include "include/sdk/steamclientpublic.h"
 #include "include/sdk/steam_gameserver.h"
+#include "include/sdk/steamtypes.h"
 
 S_API ISteamClient* g_pSteamClientGameServer = nullptr;
 
@@ -356,6 +358,15 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 		if (g_bSteamStubEnabled)
 		{
 			SteamStub_Init();
+		}
+
+		std::vector<uint32> unlockedDLC = s_PluginLoader.GetUnlockDLCAppIds();
+		CSteamAppsStub::SetUnlockedDLCAppIds(unlockedDLC);
+
+		if (s_PluginLoader.GetEmulateTicketEnabled()) {
+			uint32 emulatedAppId = s_PluginLoader.GetOgAppId();
+			if (emulatedAppId == 0) emulatedAppId = s_PluginLoader.GetAppId();
+			CSteamUserStub::SetEmulatedApp(emulatedAppId);
 		}
 	}
 	else if (dwReason == DLL_PROCESS_DETACH)
@@ -942,8 +953,7 @@ static DWORD WINAPI SteamStub_HookGetTickCount(void)
 	uint8_t* found = SteamStub_FindSignature(start, end, STEAM_STUB_SIGNATURE, sizeof(STEAM_STUB_SIGNATURE));
 	if (found)
 	{
-		found[6] = 0x90;
-		found[7] = 0xE9;
+		found[7] = 0x85;
 
 		uint32_t count = g_SteamStubCount.fetch_add(1, std::memory_order_seq_cst) + 1;
 		if (count >= STEAM_STUB_MAX_COUNT)
