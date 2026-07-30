@@ -39,9 +39,12 @@ Device ID login requires a device id to already exist, so the plugin calls `EOS_
 
 | Game | Steam AppId | Notes |
 |---|---|---|
-| **Forever Skies** | 1641960 | Redpoint EOS Online Framework (`RedpointSteam` OSS), EOS SDK 1.15.5. Remote co-op over Epic's relay. |
+| **Forever Skies** | 1641960 | Redpoint EOS Online Framework (`RedpointSteam` OSS). Uses EOS **Sessions**. Remote co-op over Epic's relay. |
+| **Palworld** | 895620 | Dual-stack Steam + EOS with its own integration, built on EOS **Lobbies**. Verified on build `0.7.3.90464`. |
 
-Should apply to other EOS titles that log in with a platform (Steam) credential — the hooks are on the EOS SDK itself, not on any game code.
+These two use EOS very differently on top of the same login — Redpoint Sessions vs. raw Lobbies — and both are fixed by the same two hooks, because the hooks are on the **EOS SDK itself**, not on any game code. Expect this to work for most EOS titles that log in with a platform (Steam) credential.
+
+Both games happen to ship a **byte-identical** Epic SDK build (1.15.5), which is also why the struct offsets below are safe for them. A game shipping a much newer SDK is the main thing worth re-verifying.
 
 ## Setup
 
