@@ -11,12 +11,12 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="redpoint_steam_lobby_plugin.cpp" />
+    <ClCompile Include="EOS_custom_plugin.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
-    <ProjectGuid>{3A9C7E21-6D5B-4F8A-9C13-7E2F4A6B0C42}</ProjectGuid>
+    <ProjectGuid>{5B1E9C34-2A7D-4E6F-8B21-9D3C5F7A0E48}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>redpoint_steam_lobby_plugin</RootNamespace>
+    <RootNamespace>EOS_custom_plugin</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -38,13 +38,13 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
-    <TargetName>redpoint_steam_lobby</TargetName>
+    <TargetName>EOS_custom</TargetName>
     <OutDir>$(ProjectDir)relbuild\x64\</OutDir>
     <IntDir>relbuild\intermediate\x64\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>false</LinkIncremental>
-    <TargetName>redpoint_steam_lobby</TargetName>
+    <TargetName>EOS_custom</TargetName>
     <OutDir>$(ProjectDir)debbuild\x64\</OutDir>
     <IntDir>debbuild\intermediate\x64\</IntDir>
   </PropertyGroup>
