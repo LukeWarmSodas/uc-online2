@@ -235,6 +235,12 @@ static void EosLog(const char* fmt, ...)
 static HANDLE        g_hWatcher   = nullptr;
 static volatile LONG g_bShutdown  = 0;
 
+// Set once EOS_Platform_Create has actually been redirected to our Epic app.
+// The login rewrite is gated on this: swapping in a Device ID login while the
+// platform still points at the PUBLISHER'S deployment would just create an
+// anonymous account on their backend, which is both useless and rude.
+static volatile LONG g_bPlatformRedirected = 0;
+
 typedef EOS_HPlatform (EOS_CALL_PLACEHOLDER)(void);
 typedef EOS_HPlatform (__cdecl* Fn_EOS_Platform_Create)(const void* Options);
 typedef void          (__cdecl* Fn_EOS_Connect_Login)(EOS_HConnect Handle, const void* Options,
@@ -246,6 +252,49 @@ static Fn_EOS_Connect_Login   g_orig_Connect_Login   = nullptr;
 static const char* SafeStr(const char* s) { return s ? s : "(null)"; }
 
 // ------------------------------------------------------------
+// Layout validation.
+//
+// We locate the id fields in EOS_Platform_Options by fixed offsets,
+// which only holds for the genuine Epic SDK. If someone has an EOS
+// EMULATOR dll in place instead (Nemirtingas et al), its options
+// struct is laid out completely differently and those offsets read
+// garbage -- previously faulting with EXCEPTION_ACCESS_VIOLATION on
+// an address like 0x0000000100000001 (two adjacent 32-bit fields
+// read as one pointer). The same would happen if a future SDK ever
+// reordered the struct.
+//
+// So: prove the layout before trusting it. A real EOS id is a
+// readable 32-char lowercase hex string, which is a strong enough
+// fingerprint that a wrong layout will essentially never pass.
+// If validation fails we skip the redirect and say why, instead of
+// crashing the game.
+// ------------------------------------------------------------
+static bool IsReadable(const void* p, size_t bytes)
+{
+    if (!p) return false;
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (!VirtualQuery(p, &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+    // Ensure the whole span sits inside this region.
+    const uint8_t* end   = (const uint8_t*)p + bytes;
+    const uint8_t* limit = (const uint8_t*)mbi.BaseAddress + mbi.RegionSize;
+    return end <= limit;
+}
+
+// True if `s` points at a NUL-terminated 32-char hex string (an EOS id).
+static bool LooksLikeEosId(const char* s)
+{
+    if (!IsReadable(s, 33)) return false;
+    for (int i = 0; i < 32; ++i) {
+        char c = s[i];
+        bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!hex) return false;
+    }
+    return s[32] == '\0';
+}
+
+// ------------------------------------------------------------
 // Hooked EOS_Platform_Create -- log the product/sandbox/deployment/client
 // the game initializes with, then call through unchanged.
 // ------------------------------------------------------------
@@ -253,12 +302,35 @@ static EOS_HPlatform __cdecl Hooked_Platform_Create(const void* Options)
 {
     if (Options) {
         uint8_t* p = (uint8_t*)Options;   // writable: we redirect the ids in place
+
+        // Validate the options block itself before touching any field.
+        if (!IsReadable(p, 88)) {
+            LOG("[EOSAuth] EOS_Platform_Create: options block not readable -- skipping redirect.");
+            return g_orig_Platform_Create ? g_orig_Platform_Create(Options) : nullptr;
+        }
+
         int32_t apiver = *(const int32_t*)(p + 0);
 
         const char** ppProductId    = (const char**)(p + 16);
         const char** ppSandboxId    = (const char**)(p + 24);
         EOS_Platform_ClientCredentials* cc = (EOS_Platform_ClientCredentials*)(p + 32);
         const char** ppDeploymentId = (const char**)(p + 80);
+
+        // Prove the layout: all three ids must look like real EOS ids. If not,
+        // we're almost certainly not looking at the genuine Epic SDK's struct.
+        const bool bLayoutOK = LooksLikeEosId(*ppProductId)
+                            && LooksLikeEosId(*ppSandboxId)
+                            && LooksLikeEosId(*ppDeploymentId);
+
+        if (!bLayoutOK) {
+            LOG("[EOSAuth] EOS_Platform_Create (ApiVersion=%d): options do NOT match the expected "
+                "Epic SDK layout -- NOT redirecting (the game will use its own EOS app).", apiver);
+            LOG("[EOSAuth]   Most likely an EOS EMULATOR dll (e.g. Nemirtingas) is installed instead "
+                "of the genuine Epic EOSSDK-Win64-Shipping.dll. Restore the original to use this plugin.");
+            LOG("[EOSAuth]   (If you ARE on the genuine SDK, it may have changed layout -- the offsets "
+                "in this plugin would need updating.)");
+            return g_orig_Platform_Create ? g_orig_Platform_Create(Options) : nullptr;
+        }
 
         LOG("[EOSAuth] EOS_Platform_Create (ApiVersion=%d) game values:", apiver);
         LOG("[EOSAuth]   ProductId=%s SandboxId=%s DeploymentId=%s",
@@ -275,6 +347,7 @@ static EOS_HPlatform __cdecl Hooked_Platform_Create(const void* Options)
                 cc->ClientId     = g_Cfg.ClientId;
                 cc->ClientSecret = g_Cfg.ClientSecret;
             }
+            InterlockedExchange(&g_bPlatformRedirected, 1);
             LOG("[EOSAuth]   -> REDIRECTED to Product=%s Sandbox=%s Deployment=%s Client=%s",
                 g_Cfg.ProductId, g_Cfg.SandboxId, g_Cfg.DeploymentId, g_Cfg.ClientId);
         } else {
@@ -303,19 +376,49 @@ typedef void (__cdecl* Fn_EOS_Connect_CreateDeviceId)(EOS_HConnect Handle, const
                                                      void* ClientData, void* CompletionDelegate);
 static Fn_EOS_Connect_CreateDeviceId g_pfn_CreateDeviceId = nullptr;
 static volatile LONG g_bDeviceIdRequested = 0;
+static volatile LONG g_bDeviceIdReady     = 0;
 
-// EOS requires a non-null completion delegate; nothing to do with the result.
-// EOS_Success and EOS_DuplicateNotAllowed both mean "a device id now exists".
-static void __cdecl OnCreateDeviceIdCb(const void* /*Data*/)
+// A login we deferred until the device id exists, so we can re-issue it from
+// the CreateDeviceId callback with the game's original ClientData/delegate.
+struct PendingLogin
 {
-    LOG("[EOSAuth] CreateDeviceId callback fired (device id should now exist).");
+    EOS_HConnect Handle;
+    void*        ClientData;
+    void*        CompletionDelegate;
+    bool         bValid;
+};
+static PendingLogin g_Pending = {};
+
+static void IssueDeviceIdLogin(const PendingLogin& p);   // fwd
+
+// EOS_Success (0) or EOS_DuplicateNotAllowed both mean "a device id now exists".
+// The result code is the first field of the callback data struct.
+static void __cdecl OnCreateDeviceIdCb(const void* Data)
+{
+    int32_t rc = (Data && IsReadable(Data, sizeof(int32_t))) ? *(const int32_t*)Data : -1;
+    LOG("[EOSAuth] CreateDeviceId completed (ResultCode=%d) -- device id now exists.", rc);
+
+    InterlockedExchange(&g_bDeviceIdReady, 1);
+
+    // Now -- and only now -- run the login we held back.
+    if (g_Pending.bValid) {
+        PendingLogin p = g_Pending;
+        g_Pending.bValid = false;
+        LOG("[EOSAuth] Re-issuing the deferred Device ID login now that the device id exists.");
+        IssueDeviceIdLogin(p);
+    }
 }
 
-// Device ID login needs a device id to already exist, otherwise it returns
-// EOS_NotFound. Rather than build an async chain, we kick off CreateDeviceId on
-// the first login attempt and lean on the game's own retry loop -- the UE log
-// shows it re-attempts Connect_Login every ~4s, and by then the id exists.
-static void EnsureDeviceId(EOS_HConnect Handle)
+// Device ID login fails with EOS_NotFound unless a device id already exists.
+//
+// The first version of this fired CreateDeviceId and let the original login
+// continue in the same tick, relying on the game to retry. That worked only by
+// luck: the login was submitted ~2ms BEFORE the device id existed. Forever
+// Skies happened to retry login every ~4s; Palworld only ever attempts it once.
+//
+// So instead we DEFER: hold the first login, create the device id, and re-issue
+// the login from that callback. Ordering is then guaranteed rather than raced.
+static void RequestDeviceId(EOS_HConnect Handle)
 {
     if (!g_pfn_CreateDeviceId || !Handle) return;
     if (InterlockedExchange(&g_bDeviceIdRequested, 1) != 0) return;   // once only
@@ -324,7 +427,7 @@ static void EnsureDeviceId(EOS_HConnect Handle)
     opts.ApiVersion  = 1;
     opts.DeviceModel = "PC Windows 64-bit";
 
-    LOG("[EOSAuth] Requesting EOS_Connect_CreateDeviceId (needed before Device ID login)...");
+    LOG("[EOSAuth] Requesting EOS_Connect_CreateDeviceId (required before Device ID login)...");
     g_pfn_CreateDeviceId(Handle, &opts, nullptr, (void*)&OnCreateDeviceIdCb);
 }
 
@@ -332,12 +435,57 @@ static void EnsureDeviceId(EOS_HConnect Handle)
 // call, but keep these alive for the call's duration regardless.
 static EOS_Connect_Credentials   g_DevCreds    = {};
 static EOS_Connect_UserLoginInfo g_DevLoginInf = {};
+static EOS_Connect_LoginOptions  g_DevLoginOpts = {};
+
+// Struct versions copied from the game's own call, so the options we build are
+// ABI-compatible with whatever EOS SDK this game ships.
+static int32_t g_LoginOptsApiVersion = 2;
+static int32_t g_CredsApiVersion     = 1;
+static int32_t g_UserInfoApiVersion  = 1;
+
+// Build a Device ID login and call the real EOS_Connect_Login, preserving the
+// game's original ClientData/CompletionDelegate so its callback still fires.
+static void IssueDeviceIdLogin(const PendingLogin& p)
+{
+    if (!g_orig_Connect_Login || !p.bValid) return;
+
+    g_DevCreds.ApiVersion = g_CredsApiVersion;
+    g_DevCreds.Token      = nullptr;                      // must be null for Device ID
+    g_DevCreds.Type       = EOS_ECT_DEVICEID_ACCESS_TOKEN;
+
+    // Device ID login REQUIRES UserLoginInfo with a DisplayName.
+    g_DevLoginInf.ApiVersion  = g_UserInfoApiVersion;
+    g_DevLoginInf.DisplayName = g_Cfg.DisplayName;
+
+    g_DevLoginOpts.ApiVersion    = g_LoginOptsApiVersion;
+    g_DevLoginOpts.Credentials   = &g_DevCreds;
+    g_DevLoginOpts.UserLoginInfo = &g_DevLoginInf;
+
+    LOG("[EOSAuth] -> EOS_Connect_Login as DEVICEID_ACCESS_TOKEN (DisplayName=%s)", g_Cfg.DisplayName);
+    g_orig_Connect_Login(p.Handle, &g_DevLoginOpts, p.ClientData, p.CompletionDelegate);
+}
 
 static void __cdecl Hooked_Connect_Login(EOS_HConnect Handle, const void* Options,
                                         void* ClientData, void* CompletionDelegate)
 {
     if (Options) {
         EOS_Connect_LoginOptions* o = (EOS_Connect_LoginOptions*)Options;   // writable
+
+        // Only act if we actually redirected the platform to our Epic app --
+        // see g_bPlatformRedirected. Also validate before dereferencing, in
+        // case this isn't the layout we expect (EOS emulator / newer SDK).
+        if (!InterlockedCompareExchange(&g_bPlatformRedirected, 0, 0)) {
+            LOG("[EOSAuth] EOS_Connect_Login: platform was not redirected -- passing through untouched.");
+            if (g_orig_Connect_Login) g_orig_Connect_Login(Handle, Options, ClientData, CompletionDelegate);
+            return;
+        }
+        if (!IsReadable(o, sizeof(EOS_Connect_LoginOptions)) ||
+            (o->Credentials && !IsReadable(o->Credentials, sizeof(EOS_Connect_Credentials)))) {
+            LOG("[EOSAuth] EOS_Connect_Login: options not readable as expected -- passing through untouched.");
+            if (g_orig_Connect_Login) g_orig_Connect_Login(Handle, Options, ClientData, CompletionDelegate);
+            return;
+        }
+
         int t = o->Credentials ? o->Credentials->Type : -1;
 
         LOG("[EOSAuth] EOS_Connect_Login: OptionsApiVersion=%d Credentials.Type=%d (%s) Token=%s",
@@ -358,20 +506,29 @@ static void __cdecl Hooked_Connect_Login(EOS_HConnect Handle, const void* Option
         // real ProductUserId on our own deployment, which is all the game
         // needs to create and advertise a session.
         if (g_Cfg.bValid && t != EOS_ECT_DEVICEID_ACCESS_TOKEN) {
-            EnsureDeviceId(Handle);
+            // Remember the struct versions the game used so our re-issued call
+            // stays ABI-compatible with whatever SDK this is.
+            g_LoginOptsApiVersion = o->ApiVersion;
+            g_CredsApiVersion     = o->Credentials   ? o->Credentials->ApiVersion   : 1;
+            g_UserInfoApiVersion  = o->UserLoginInfo ? o->UserLoginInfo->ApiVersion : 1;
 
-            g_DevCreds.ApiVersion = o->Credentials ? o->Credentials->ApiVersion : 1;
-            g_DevCreds.Token      = nullptr;                        // must be null for Device ID
-            g_DevCreds.Type       = EOS_ECT_DEVICEID_ACCESS_TOKEN;
+            PendingLogin p = { Handle, ClientData, CompletionDelegate, true };
 
-            // Device ID login REQUIRES UserLoginInfo with a DisplayName.
-            g_DevLoginInf.ApiVersion  = o->UserLoginInfo ? o->UserLoginInfo->ApiVersion : 1;
-            g_DevLoginInf.DisplayName = g_Cfg.DisplayName;
+            if (InterlockedCompareExchange(&g_bDeviceIdReady, 0, 0)) {
+                // Device id already exists (a later login attempt) -- issue now.
+                LOG("[EOSAuth]   -> DEVICEID login (device id already exists)");
+                IssueDeviceIdLogin(p);
+                return;   // we issued the real call; don't also forward the original
+            }
 
-            o->Credentials   = &g_DevCreds;
-            o->UserLoginInfo = &g_DevLoginInf;
-
-            LOG("[EOSAuth]   -> REWROTE to DEVICEID_ACCESS_TOKEN (DisplayName=%s)", g_Cfg.DisplayName);
+            // First attempt: hold this login, create the device id, and let the
+            // CreateDeviceId callback re-issue it. Ordering is then guaranteed
+            // instead of raced (the old code forwarded the login ~2ms before the
+            // device id existed and relied on the game retrying).
+            g_Pending = p;
+            LOG("[EOSAuth]   -> DEFERRING login until the device id exists");
+            RequestDeviceId(Handle);
+            return;   // deliberately do NOT forward the doomed Steam-ticket login
         }
     } else {
         LOG("[EOSAuth] EOS_Connect_Login: Options=null");
