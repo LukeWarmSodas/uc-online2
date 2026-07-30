@@ -40,11 +40,11 @@ Device ID login requires a device id to already exist, so the plugin calls `EOS_
 | Game | Steam AppId | Notes |
 |---|---|---|
 | **Forever Skies** | 1641960 | Redpoint EOS Online Framework (`RedpointSteam` OSS). Uses EOS **Sessions**. Remote co-op over Epic's relay. |
-| **Palworld** | 895620 | Dual-stack Steam + EOS with its own integration, built on EOS **Lobbies**. Verified on build `0.7.3.90464`. |
+| **Palworld** | 1623730 | Dual-stack Steam + EOS with its own integration, built on EOS **Lobbies**. Verified on the **1.0 release** and on the older `0.7.3.90464` build. |
 
-These two use EOS very differently on top of the same login — Redpoint Sessions vs. raw Lobbies — and both are fixed by the same two hooks, because the hooks are on the **EOS SDK itself**, not on any game code. Expect this to work for most EOS titles that log in with a platform (Steam) credential.
+These use EOS very differently on top of the same login — Redpoint Sessions vs. raw Lobbies — and both are fixed by the same two hooks, because the hooks are on the **EOS SDK itself**, not on any game code. Expect this to work for most EOS titles that log in with a platform (Steam) credential.
 
-Both games happen to ship a **byte-identical** Epic SDK build (1.15.5), which is also why the struct offsets below are safe for them. A game shipping a much newer SDK is the main thing worth re-verifying.
+They also span **two different SDK builds** (Forever Skies and old Palworld ship a byte-identical 1.15.5; Palworld 1.0 reports `EOS_Platform_Options` `ApiVersion=12`), and the same offsets resolved the game's real IDs in both — EOS appends fields rather than reordering them. Still worth a sanity check on a much newer SDK: if the `[EOSAuth]` log prints the game's original IDs as valid 32-hex strings, the layout matched.
 
 ## Setup
 
