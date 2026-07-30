@@ -19,8 +19,13 @@ rem ============================================================
 set "SCRIPTDIR=%~dp0"
 
 rem ---- locate the plugin DLL (built output, else release-style fallback) ----
+rem Look in every layout this script can ship in:
+rem   1. a repo checkout (built output)
+rem   2. a release zip (plugins\ next to patch.bat)
+rem   3. the DLL dropped beside patch.bat
 set "PLUGIN_DLL="
 if exist "%SCRIPTDIR%plugins\photon_universal\relbuild\x64\photon_universal.dll" set "PLUGIN_DLL=%SCRIPTDIR%plugins\photon_universal\relbuild\x64\photon_universal.dll"
+if not defined PLUGIN_DLL if exist "%SCRIPTDIR%plugins\photon_universal.dll" set "PLUGIN_DLL=%SCRIPTDIR%plugins\photon_universal.dll"
 if not defined PLUGIN_DLL if exist "%SCRIPTDIR%photon_universal.dll" set "PLUGIN_DLL=%SCRIPTDIR%photon_universal.dll"
 if not defined PLUGIN_DLL (
   echo [ERROR] photon_universal.dll not found.
