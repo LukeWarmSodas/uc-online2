@@ -130,6 +130,21 @@ uint32 GetOgAppId()
 		return (_stricmp(buf, "true") == 0 || _stricmp(buf, "1") == 0 || _stricmp(buf, "yes") == 0);
 	}
 
+	// [Settings] VerboseLog=true re-enables the very chatty per-frame /
+	// per-callback log lines (RunCallbacks, ContextInit, GetHSteamPipe,
+	// callback dispatch traces). Off by default: those fire every frame and
+	// bury the useful lines under tens of thousands of entries.
+	bool GetVerboseLog()
+	{
+		if (m_IniPath[0] == '\0')
+			return false;
+
+		char buf[8] = { 0 };
+		GetPrivateProfileStringA("Settings", "VerboseLog", "false", buf, sizeof(buf), m_IniPath);
+
+		return (_stricmp(buf, "true") == 0 || _stricmp(buf, "1") == 0 || _stricmp(buf, "yes") == 0);
+	}
+
 	// This does not need to be set!! It will automatically run as true!!
 	bool GetForceOwnership()
 	{

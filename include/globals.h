@@ -536,6 +536,13 @@ extern uintp g_CtxCounter;
 
 void UCOLOG(const char* fmt, ...);
 void UCOColor(WORD color, const char* text);
+
+// Verbose (hot-path) logging switch -- [Settings] VerboseLog in union-crax.ini.
+// Off by default. Guards the per-frame / per-callback traces that would
+// otherwise emit tens of thousands of lines per session and bury anything
+// useful. Use UCOLOG_HOT for those; keep plain UCOLOG for one-shot events.
+extern bool g_bVerboseLog;
+#define UCOLOG_HOT(...) do { if (g_bVerboseLog) UCOLOG(__VA_ARGS__); } while (0)
 void* InitSteamClient(HMODULE* phModule, bool bLocal, const char* iface);
 void LoadBreakpadSymbols(HMODULE hMod);
 void UpdateMinidumpSteamID(uint64 sid);

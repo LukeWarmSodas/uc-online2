@@ -74,7 +74,14 @@ char g_BreakpadTimestamp[64] = { 0 };
 uint32 g_BreakpadAppID = 0;
 uint64 g_BreakpadSteamID = 0;
 
-bool g_bTryCatch = false;
+// Default ON: route dispatch through CCallbackDispatcher::DispatchFrameSafe,
+// whose try/catch (with /EHa) contains a faulting game callback instead of
+// letting it kill the process. Games can still toggle this via
+// SteamAPI_SetTryCatchCallbacks(). This is a safety net, not a substitute for
+// the dispatcher's locking/lifetime fixes -- it just keeps a bad callback from
+// being fatal (e.g. Forever Skies crashing from UE's online thread).
+bool g_bTryCatch = true;
+bool g_bVerboseLog = false;
 int g_DispatchMode = 0;
 char g_InstallPath[MAX_PATH] = { 0 };
 bool g_bHaveInstallPath = false;
@@ -104,7 +111,7 @@ static void SteamStub_Init();
 
 S_API void* S_CALLTYPE SteamInternal_ContextInit(void* pData)
 {
-	UCOLOG("[UCOnline2] SteamInternal_ContextInit");
+	UCOLOG_HOT("[UCOnline2] SteamInternal_ContextInit");
 	if (!pData) return nullptr;
 	void** pArr = (void**)pData;
 	uintp* pCounter = (uintp*)&pArr[1];
@@ -346,6 +353,11 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 		InitializeSRWLock(&g_CtxLock);
 		InitializeSRWLock(&g_CallbackLock);
 
+		// Read before anything chatty runs, so the hot-path traces honour it.
+		g_bVerboseLog = s_PluginLoader.GetVerboseLog();
+		if (g_bVerboseLog)
+			UCOLOG("[UCOnline2] VerboseLog enabled -- per-frame callback traces will be logged");
+
 		#ifdef _DEBUG
 		g_pDumpHandler = new CDumpHandler();
 		#endif
@@ -436,6 +448,9 @@ CCallbackDispatcher::CCallbackDispatcher()
 {
 	UCOColor(FOREGROUND_BLUE | FOREGROUND_INTENSITY, "[UCOnline2] CCallbackDispatcher constructed\r\n");
 
+	// Must exist before any thread can reach the maps.
+	InitializeCriticalSection(&m_MapLock);
+
 	m_pfnBGetCallback = nullptr;
 	m_pfnFreeLastCallback = nullptr;
 	m_pfnGetAPICallResult = nullptr;
@@ -461,9 +476,13 @@ CCallbackDispatcher::~CCallbackDispatcher()
 	m_ManualCbId = 0;
 	m_ManualCbSize = 0;
 	m_bProcessing = false;
-	m_CallbackMap.clear();
-	m_CallResultMap.clear();
-	m_BufferMap.clear();
+	{
+		CDispatcherLock lock(&m_MapLock);
+		m_CallbackMap.clear();
+		m_CallResultMap.clear();
+		m_BufferMap.clear();
+	}
+	DeleteCriticalSection(&m_MapLock);
 }
 
 void CCallbackDispatcher::Shutdown()
@@ -478,14 +497,20 @@ void CCallbackDispatcher::Shutdown()
 	m_ManualCbId = 0;
 	m_ManualCbSize = 0;
 	m_bProcessing = false;
-	m_CallbackMap.clear();
-	m_CallResultMap.clear();
-	m_BufferMap.clear();
+	{
+		CDispatcherLock lock(&m_MapLock);
+		m_CallbackMap.clear();
+		m_CallResultMap.clear();
+		m_BufferMap.clear();
+	}
 }
 
 void CCallbackDispatcher::ExecuteCallResult(HSteamPipe hPipe, SteamAPICall_t hCall, CCallbackBase* pCb)
 {
-	UCOLOG("[UCOnline2] ExecuteCallResult -> call=%lld cb=%d size=%d\r\n", hCall, pCb->GetICallback(), pCb->GetCallbackSizeBytes());
+	if (!pCb)
+		return;
+
+	UCOLOG_HOT("[UCOnline2] ExecuteCallResult -> call=%lld cb=%d size=%d\r\n", hCall, pCb->GetICallback(), pCb->GetCallbackSizeBytes());
 
 	BYTE* pBuffer = new BYTE[pCb->GetCallbackSizeBytes()]();
 	bool bFailed = false;
@@ -513,6 +538,19 @@ void CCallbackDispatcher::ExecuteCallResult(HSteamPipe hPipe, SteamAPICall_t hCa
 		UCOColor(FOREGROUND_RED | FOREGROUND_INTENSITY, "[UCOnline2] GetAPICallResult failed\r\n");
 		delete[] pBuffer;
 	}
+
+	// Retire the one-shot registration. The SDK makes the DISPATCHER own this:
+	//     CCallResult<T,P>::Run(...) { m_hAPICall = k_uAPICallInvalid; // caller unregisters for us
+	// (see include/sdk/steam_api_internal.h). Because Run() clears the handle,
+	// the game's ~CCallResult() -> Cancel() sees an invalid handle and never
+	// calls SteamAPI_UnregisterCallResult. If we don't drop the entry here it
+	// lingers in m_CallResultMap and becomes a DANGLING pointer the moment the
+	// game frees the object -- the next SteamAPICallCompleted_t match loop then
+	// calls its virtuals (GetICallback / GetCallbackSizeBytes) on freed memory.
+	{
+		CDispatcherLock lock(&m_MapLock);
+		m_CallResultMap.erase(hCall);
+	}
 }
 
 void CCallbackDispatcher::DispatchFrame(HSteamPipe hPipe, bool bServer)
@@ -524,139 +562,203 @@ void CCallbackDispatcher::DispatchFrame(HSteamPipe hPipe, bool bServer)
 	if (!m_pfnBGetCallback(hPipe, &msg))
 		return;
 
-	UCOLOG("[UCOnline2] Callback received -> %d\r\n", msg.m_iCallback);
+	UCOLOG_HOT("[UCOnline2] Callback received -> %d\r\n", msg.m_iCallback);
 	m_CurrentUser = msg.m_hSteamUser;
+
+	// The lock is held for the whole dispatch, INCLUDING across Run().
+	// That is deliberate and is what keeps the callback object alive: a game's
+	// CCallback destructor calls SteamAPI_UnregisterCallback -> Remove(), which
+	// needs this same lock, so an object cannot be destroyed while we are inside
+	// its Run(). Releasing the lock first would reopen a use-after-free window.
+	// The CRITICAL_SECTION is recursive, so a callback that registers or
+	// unregisters others from inside Run() (same thread) still works.
+	CDispatcherLock lock(&m_MapLock);
 
 	if (msg.m_iCallback == SteamAPICallCompleted_t::k_iCallback && msg.m_cubParam == sizeof(SteamAPICallCompleted_t))
 	{
 		SteamAPICallCompleted_t* pCompleted = (SteamAPICallCompleted_t*)msg.m_pubParam;
 
-		if (!m_CallResultMap.empty())
+		// Snapshot first: ExecuteCallResult re-enters and edits m_CallResultMap
+		// (it retires the fired entry), which would invalidate a live iterator.
+		std::vector<std::pair<SteamAPICall_t, CCallbackBase*> > matches;
+		for (auto it = m_CallResultMap.begin(); it != m_CallResultMap.end(); ++it)
 		{
-			for (auto it = m_CallResultMap.begin(); it != m_CallResultMap.end(); ++it)
+			if (!it->second)
+				continue;
+
+			if (pCompleted->m_hAsyncCall == it->first &&
+				pCompleted->m_iCallback == it->second->GetICallback() &&
+				pCompleted->m_cubParam == (uint32)it->second->GetCallbackSizeBytes())
 			{
-				if (pCompleted->m_hAsyncCall == it->first &&
-					pCompleted->m_iCallback == it->second->GetICallback() &&
-					pCompleted->m_cubParam == (uint32)it->second->GetCallbackSizeBytes())
-				{
-					ExecuteCallResult(hPipe, it->first, it->second);
-				}
+				matches.push_back(*it);
 			}
 		}
+
+		for (size_t i = 0; i < matches.size(); ++i)
+			ExecuteCallResult(hPipe, matches[i].first, matches[i].second);
 	}
 	else
 	{
-		if (!m_CallbackMap.empty())
+		CCallbackBase* pTarget = nullptr;
+		bool bServerCb = false;
+
+		for (auto it = m_CallbackMap.begin(); it != m_CallbackMap.end(); ++it)
 		{
-			for (auto it = m_CallbackMap.begin(); it != m_CallbackMap.end(); ++it)
+			CCallbackBase* pCb = it->second;
+			if (!pCb)
+				continue;
+
+			if (it->first == msg.m_iCallback && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsRegistered))
 			{
-				CCallbackBase* pCb = it->second;
-
-				if (it->first == msg.m_iCallback && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsRegistered))
+				if (msg.m_hSteamUser == g_ServerUser && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && bServer)
 				{
-					if (msg.m_hSteamUser == g_ServerUser && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && bServer)
-					{
-						UCOLOG("[UCOnline2] Server callback -> %d flags=%d\r\n", msg.m_iCallback, pCb->m_nCallbackFlags);
-						pCb->Run(msg.m_pubParam);
-						break;
-					}
-					else if (msg.m_hSteamUser == g_ClientUser && !(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && !bServer)
-					{
-						UCOLOG("[UCOnline2] Client callback -> %d flags=%d\r\n", msg.m_iCallback, pCb->m_nCallbackFlags);
-
-						bool bSkip = false;
-
-						if (msg.m_iCallback == HTML_NeedsPaint_t::k_iCallback && msg.m_cubParam == sizeof(HTML_NeedsPaint_t))
-						{
-							HTML_NeedsPaint_t* pPaint = (HTML_NeedsPaint_t*)msg.m_pubParam;
-							if (pPaint->unWide == 1 || pPaint->unTall == 1)
-								bSkip = true;
-						}
-
-						RunCallbackPatchers(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
-
-						if (!bSkip)
-							pCb->Run(msg.m_pubParam);
-
-						break;
-					}
+					pTarget = pCb;
+					bServerCb = true;
+					break;
 				}
+				else if (msg.m_hSteamUser == g_ClientUser && !(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && !bServer)
+				{
+					pTarget = pCb;
+					bServerCb = false;
+					break;
+				}
+			}
+		}
+
+		if (pTarget)
+		{
+			if (bServerCb)
+			{
+				UCOLOG_HOT("[UCOnline2] Server callback -> %d flags=%d\r\n", msg.m_iCallback, pTarget->m_nCallbackFlags);
+				pTarget->Run(msg.m_pubParam);
+			}
+			else
+			{
+				UCOLOG_HOT("[UCOnline2] Client callback -> %d flags=%d\r\n", msg.m_iCallback, pTarget->m_nCallbackFlags);
+
+				bool bSkip = false;
+
+				if (msg.m_iCallback == HTML_NeedsPaint_t::k_iCallback && msg.m_cubParam == sizeof(HTML_NeedsPaint_t))
+				{
+					HTML_NeedsPaint_t* pPaint = (HTML_NeedsPaint_t*)msg.m_pubParam;
+					if (pPaint->unWide == 1 || pPaint->unTall == 1)
+						bSkip = true;
+				}
+
+				RunCallbackPatchers(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
+
+				if (!bSkip)
+					pTarget->Run(msg.m_pubParam);
 			}
 		}
 	}
 
-	UCOLOG("[UCOnline2] Freeing callback -> %d\r\n", msg.m_iCallback);
+	UCOLOG_HOT("[UCOnline2] Freeing callback -> %d\r\n", msg.m_iCallback);
 	SecureZeroMemory(msg.m_pubParam, msg.m_cubParam);
 	m_pfnFreeLastCallback(hPipe);
 }
 
 void CCallbackDispatcher::DispatchFrameSafe(HSteamPipe hPipe, bool bServer)
 {
+	if (!m_pfnBGetCallback || !m_pfnFreeLastCallback || !m_pfnGetAPICallResult)
+		return;
+
+	CallbackMsg_t msg = { 0 };
+	if (!m_pfnBGetCallback(hPipe, &msg))
+		return;
+
+	// The callback MUST be freed whether or not dispatch throws. If we skipped
+	// the free on the exception path, BGetCallback would keep handing back the
+	// same message forever -- turning one bad callback into an endless fault
+	// loop (a hang instead of a crash).
+	bool bDispatched = false;
+
 	try
 	{
-		if (!m_pfnBGetCallback || !m_pfnFreeLastCallback || !m_pfnGetAPICallResult)
-			return;
-
-		CallbackMsg_t msg = { 0 };
-		if (!m_pfnBGetCallback(hPipe, &msg))
-			return;
-
-		UCOLOG("[UCOnline2] Callback (safe) -> %d\r\n", msg.m_iCallback);
+		UCOLOG_HOT("[UCOnline2] Callback (safe) -> %d\r\n", msg.m_iCallback);
 		m_CurrentUser = msg.m_hSteamUser;
+
+		// Same locking/snapshot discipline as DispatchFrame -- see the comment
+		// on m_MapLock. Held across Run() so a concurrent unregister+destroy
+		// cannot free the callback out from under us.
+		CDispatcherLock lock(&m_MapLock);
 
 		if (msg.m_iCallback == SteamAPICallCompleted_t::k_iCallback && msg.m_cubParam == sizeof(SteamAPICallCompleted_t))
 		{
 			SteamAPICallCompleted_t* pCompleted = (SteamAPICallCompleted_t*)msg.m_pubParam;
 
-			if (!m_CallResultMap.empty())
+			std::vector<std::pair<SteamAPICall_t, CCallbackBase*> > matches;
+			for (auto it = m_CallResultMap.begin(); it != m_CallResultMap.end(); ++it)
 			{
-				for (auto it = m_CallResultMap.begin(); it != m_CallResultMap.end(); ++it)
+				if (!it->second)
+					continue;
+
+				if (pCompleted->m_hAsyncCall == it->first &&
+					pCompleted->m_iCallback == it->second->GetICallback() &&
+					pCompleted->m_cubParam == (uint32)it->second->GetCallbackSizeBytes())
 				{
-					if (pCompleted->m_hAsyncCall == it->first &&
-						pCompleted->m_iCallback == it->second->GetICallback() &&
-						pCompleted->m_cubParam == (uint32)it->second->GetCallbackSizeBytes())
-					{
-						ExecuteCallResult(hPipe, it->first, it->second);
-					}
+					matches.push_back(*it);
 				}
 			}
+
+			for (size_t i = 0; i < matches.size(); ++i)
+				ExecuteCallResult(hPipe, matches[i].first, matches[i].second);
 		}
 		else
 		{
-			if (!m_CallbackMap.empty())
-			{
-				for (auto it = m_CallbackMap.begin(); it != m_CallbackMap.end(); ++it)
-				{
-					CCallbackBase* pCb = it->second;
+			CCallbackBase* pTarget = nullptr;
+			bool bServerCb = false;
 
-					if (it->first == msg.m_iCallback && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsRegistered))
+			for (auto it = m_CallbackMap.begin(); it != m_CallbackMap.end(); ++it)
+			{
+				CCallbackBase* pCb = it->second;
+				if (!pCb)
+					continue;
+
+				if (it->first == msg.m_iCallback && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsRegistered))
+				{
+					if (msg.m_hSteamUser == g_ServerUser && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && bServer)
 					{
-						if (msg.m_hSteamUser == g_ServerUser && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && bServer)
-						{
-							UCOLOG("[UCOnline2] Server callback (safe) -> %d flags=%d\r\n", msg.m_iCallback, pCb->m_nCallbackFlags);
-							pCb->Run(msg.m_pubParam);
-							break;
-						}
-						else if (msg.m_hSteamUser == g_ClientUser && !(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && !bServer)
-						{
-							UCOLOG("[UCOnline2] Client callback (safe) -> %d flags=%d\r\n", msg.m_iCallback, pCb->m_nCallbackFlags);
-							RunCallbackPatchers(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
-							pCb->Run(msg.m_pubParam);
-							break;
-						}
+						pTarget = pCb;
+						bServerCb = true;
+						break;
 					}
+					else if (msg.m_hSteamUser == g_ClientUser && !(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && !bServer)
+					{
+						pTarget = pCb;
+						bServerCb = false;
+						break;
+					}
+				}
+			}
+
+			if (pTarget)
+			{
+				if (bServerCb)
+				{
+					UCOLOG_HOT("[UCOnline2] Server callback (safe) -> %d flags=%d\r\n", msg.m_iCallback, pTarget->m_nCallbackFlags);
+					pTarget->Run(msg.m_pubParam);
+				}
+				else
+				{
+					UCOLOG_HOT("[UCOnline2] Client callback (safe) -> %d flags=%d\r\n", msg.m_iCallback, pTarget->m_nCallbackFlags);
+					RunCallbackPatchers(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
+					pTarget->Run(msg.m_pubParam);
 				}
 			}
 		}
 
-		UCOLOG("[UCOnline2] Freeing callback (safe) -> %d\r\n", msg.m_iCallback);
-		SecureZeroMemory(msg.m_pubParam, msg.m_cubParam);
-		m_pfnFreeLastCallback(hPipe);
+		bDispatched = true;
 	}
 	catch (...)
 	{
-		UCOColor(FOREGROUND_RED | FOREGROUND_INTENSITY, "[UCOnline2] Exception in callback dispatch\r\n");
+		// Contained: a faulting game callback no longer kills the process.
+		UCOColor(FOREGROUND_RED | FOREGROUND_INTENSITY, "[UCOnline2] Exception in callback dispatch -- callback skipped\r\n");
 	}
+
+	UCOLOG_HOT("[UCOnline2] Freeing callback (safe) -> %d (dispatched=%d)\r\n", msg.m_iCallback, (int)bDispatched);
+	SecureZeroMemory(msg.m_pubParam, msg.m_cubParam);
+	m_pfnFreeLastCallback(hPipe);
 }
 
 void CCallbackDispatcher::Add(CCallbackBase* pCb, int iCallback)
@@ -674,6 +776,8 @@ void CCallbackDispatcher::Add(CCallbackBase* pCb, int iCallback)
 
 	pCb->m_nCallbackFlags |= pCb->k_ECallbackFlagsRegistered;
 	pCb->m_iCallback = iCallback;
+
+	CDispatcherLock lock(&m_MapLock);
 	m_CallbackMap.insert(std::make_pair(iCallback, pCb));
 }
 
@@ -695,6 +799,7 @@ void CCallbackDispatcher::AddCallResult(CCallbackBase* pCb, SteamAPICall_t hCall
 
 	pCb->m_nCallbackFlags |= pCb->k_ECallbackFlagsRegistered;
 
+	CDispatcherLock lock(&m_MapLock);
 	auto existing = m_CallResultMap.find(hCall);
 	if (existing == m_CallResultMap.end())
 	{
@@ -715,25 +820,34 @@ void CCallbackDispatcher::Remove(CCallbackBase* pCb)
 		return;
 	}
 
-	if (!(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsRegistered))
-	{
-		UCOColor(FOREGROUND_RED | FOREGROUND_INTENSITY, "[UCOnline2] Remove: not registered\r\n");
-		return;
-	}
-
-	if (m_CallbackMap.empty())
-		return;
+	// Deliberately NO early-return on the registered flag. This runs from the
+	// game's CCallback destructor, so bailing out would leave a pointer to an
+	// object that is about to be freed sitting in the map -- a later dispatch
+	// would then call Run()/virtuals on freed memory. The entry must go
+	// regardless of the flag's state.
+	CDispatcherLock lock(&m_MapLock);
 
 	UCOLOG("[UCOnline2] Unregister callback -> %d flags=%d\r\n", pCb->GetICallback(), pCb->m_nCallbackFlags);
 	pCb->m_nCallbackFlags &= ~pCb->k_ECallbackFlagsRegistered;
 
-	for (auto it = m_CallbackMap.begin(); it != m_CallbackMap.end(); ++it)
+	// Erase EVERY entry for this callback (it can be registered under more than
+	// one key); any straggler is a dangling pointer waiting to crash us.
+	for (auto it = m_CallbackMap.begin(); it != m_CallbackMap.end(); )
 	{
 		if (it->second == pCb)
-		{
-			m_CallbackMap.erase(it);
-			break;
-		}
+			it = m_CallbackMap.erase(it);
+		else
+			++it;
+	}
+
+	// It may also still be sitting in the call-result map, e.g. the game frees
+	// a CCallResult whose API call never completed.
+	for (auto it = m_CallResultMap.begin(); it != m_CallResultMap.end(); )
+	{
+		if (it->second == pCb)
+			it = m_CallResultMap.erase(it);
+		else
+			++it;
 	}
 }
 
@@ -745,14 +859,26 @@ void CCallbackDispatcher::RemoveCallResult(CCallbackBase* pCb, SteamAPICall_t hC
 		return;
 	}
 
-	if (!(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsRegistered))
-	{
-		UCOColor(FOREGROUND_RED | FOREGROUND_INTENSITY, "[UCOnline2] RemoveCallResult: not registered\r\n");
-		return;
-	}
-
+	// As in Remove(): never early-return on the flag, or the map keeps a pointer
+	// to an object the game is about to destroy.
 	UCOLOG("[UCOnline2] Unregister call result -> %lld cb=%d flags=%d\r\n", hCall, pCb->GetICallback(), pCb->m_nCallbackFlags);
 	pCb->m_nCallbackFlags &= ~pCb->k_ECallbackFlagsRegistered;
+
+	CDispatcherLock lock(&m_MapLock);
+
+	// This erase was missing entirely: the call-result entry was never removed,
+	// so m_CallResultMap kept the pointer forever and it dangled as soon as the
+	// game freed the CCallResult.
+	m_CallResultMap.erase(hCall);
+
+	// The same object may be registered under other handles too.
+	for (auto it = m_CallResultMap.begin(); it != m_CallResultMap.end(); )
+	{
+		if (it->second == pCb)
+			it = m_CallResultMap.erase(it);
+		else
+			++it;
+	}
 
 	auto bufIt = m_BufferMap.find(hCall);
 	if (bufIt != m_BufferMap.end())

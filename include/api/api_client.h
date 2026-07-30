@@ -94,7 +94,7 @@ S_API HSteamPipe S_CALLTYPE GetHSteamPipe()
 
 S_API HSteamUser S_CALLTYPE GetHSteamUser()
 {
-	UCOLOG("[UCOnline2] GetHSteamUser\r\n");
+	UCOLOG_HOT("[UCOnline2] GetHSteamUser\r\n");
 	return g_ClientUser;
 }
 
@@ -106,7 +106,7 @@ S_API HSteamPipe S_CALLTYPE SteamAPI_GetHSteamPipe()
 
 S_API HSteamUser S_CALLTYPE SteamAPI_GetHSteamUser()
 {
-	UCOLOG("[UCOnline2] SteamAPI_GetHSteamUser\r\n");
+	UCOLOG_HOT("[UCOnline2] SteamAPI_GetHSteamUser\r\n");
 	return g_ClientUser;
 }
 

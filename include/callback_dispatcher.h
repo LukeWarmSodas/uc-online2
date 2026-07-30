@@ -15,6 +15,18 @@ typedef bool (S_CALLTYPE* Fn_BGetCallback)(HSteamPipe hPipe, CallbackMsg_t* pMsg
 typedef void (S_CALLTYPE* Fn_FreeLastCallback)(HSteamPipe hPipe);
 typedef bool (S_CALLTYPE* Fn_GetAPICallResult)(HSteamPipe hPipe, SteamAPICall_t hCall, void* pBuf, int cubBuf, int iExpected, bool* pbFailed);
 
+// Scoped lock for CCallbackDispatcher::m_MapLock.
+class CDispatcherLock
+{
+public:
+	explicit CDispatcherLock(CRITICAL_SECTION* pcs) : m_pcs(pcs) { if (m_pcs) EnterCriticalSection(m_pcs); }
+	~CDispatcherLock() { if (m_pcs) LeaveCriticalSection(m_pcs); }
+private:
+	CRITICAL_SECTION* m_pcs;
+	CDispatcherLock(const CDispatcherLock&);
+	CDispatcherLock& operator=(const CDispatcherLock&);
+};
+
 class CCallbackDispatcher
 {
 public:
@@ -28,6 +40,22 @@ public:
 	std::multimap<int, CCallbackBase*> m_CallbackMap;
 	std::map<SteamAPICall_t, CCallbackBase*> m_CallResultMap;
 	std::map<SteamAPICall_t, BYTE*> m_BufferMap;
+
+	// Guards the three maps above.
+	//
+	// SteamAPI_RunCallbacks serializes DISPATCH against itself (via
+	// g_CallbackLock), but SteamAPI_RegisterCallback / UnregisterCallback /
+	// RegisterCallResult / UnregisterCallResult take NO lock. So a game thread
+	// can mutate these maps while another thread is walking them mid-dispatch --
+	// UE does exactly this, driving SteamAPI_RunCallbacks from
+	// FOnlineAsyncTaskManagerSteam::OnlineTick() while the game thread registers
+	// callbacks. The stale iterator then yields a dangling CCallbackBase*, and
+	// the virtual call through it faults (seen as EXCEPTION_ACCESS_VIOLATION at
+	// 0x8 / 0xffffffffffffffff in _guard_dispatch_icall under Forever Skies).
+	//
+	// Re-entrant by design: callbacks legitimately register/unregister others
+	// from inside Run(), so this must be a recursive CRITICAL_SECTION.
+	CRITICAL_SECTION m_MapLock;
 
 	CCallbackDispatcher();
 	~CCallbackDispatcher();
