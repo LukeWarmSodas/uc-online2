@@ -10,7 +10,7 @@ __**If using downloaded .dlls from [Releases](https://github.com/LukeWarmSodas/u
    - 2a. Rename the original .dll before copying it to something else if you feel you must back it up, something like ``steam_api_o.dll`` as Goldberg Emu suggests or ``steam_api64.dll.old``. (It doesn't matter as long as it is just changed.)
 - 3. Make sure Steam is running first. Then try running the game as you normally would from the .exe. If it has SteamStub, use Steamless to remove it or use the .dll made to bypass it for games that Steamless cannot unpack. (Dave the Diver is an example.)
    - 3a. If it throws an error related to auth failure, restart Steam and try again. If the error persists, contact me. I'll work with you to figure it out one way or another. 
-   - 3b. If the game won't launch at all or crashes immediately, see [Administrator / elevation](#administrator--elevation) — Steam and the game need to be at the same elevation, and both non-elevated is the setup that works.
+   - 3b. If the game won't launch at all, see [Administrator / elevation](#administrator--elevation) — Steam and the game have to run at the same elevation. If the game needs admin, run Steam as admin too.
 
 __**If using self built .dlls:**__
 - 1. Run `build.bat` or open `uc_online2.vcxproj` in Visual Studio.
@@ -23,20 +23,29 @@ __**If using self built .dlls:**__
 
 UCOnline2 is a **passthrough** — the real Steam client has to be running, and the game talks to it over Steam's IPC. That IPC is sensitive to Windows integrity levels, so **run Steam and the game at the same elevation.**
 
-**The safe setup is both NOT elevated.** Launch Steam normally, launch the game normally.
+**What matters is that they match** — either is fine as long as both are the same:
 
-Two ways this goes wrong:
+| Steam | Game | Result |
+|---|---|---|
+| normal | normal | ✅ works — the usual setup |
+| **admin** | **admin** | ✅ works — use this when the game needs admin |
+| normal | admin | ❌ game refuses to launch |
+| admin | normal | ❌ same problem, other way round |
 
-- **Mismatched** (one elevated, one not) — the game can't reach the Steam client. Usually shows up as an init/auth failure, or the game acting like Steam isn't running at all.
-- **Both elevated** — some games still fail to launch or crash outright. If you're running Steam as admin, that's worth undoing before debugging anything else.
+A mismatch typically looks like the game refusing to start at all, an init/auth failure, or the game behaving as though Steam isn't running.
 
-If a game refuses to start or crashes on launch and you're sure the .dll and .ini are right, **check this first** — it's a common cause and costs nothing to rule out:
+**Some games genuinely require admin.** Those aren't broken — you just have to bring Steam up to match:
 
-1. Fully exit Steam (tray icon → Exit), then start it normally (no "Run as administrator").
-2. Right-click the game .exe → Properties → Compatibility → make sure **Run this program as an administrator** is unchecked. Check the launcher .exe too if the game has one.
-3. If you used a shortcut, check its Properties → Shortcut → Advanced as well.
+1. Fully exit Steam (tray icon → Exit — not just closing the window).
+2. Right-click `steam.exe` → **Run as administrator**, and let it finish signing in.
+3. Launch the game as admin as usual.
 
-Note that Windows will silently elevate a child process if its parent is elevated — so launching a game from an elevated launcher, script, or terminal elevates the game too, even with every checkbox clear.
+If a game *doesn't* need admin, leave both normal; it's the simpler setup and there's nothing to gain from elevating.
+
+Two things that catch people out:
+
+- Windows silently elevates a child process when its parent is elevated — launching the game from an elevated launcher, script, or terminal elevates the game too, even with every compatibility checkbox clear.
+- Closing Steam's window only hides it to the tray. If you're switching Steam's elevation you have to actually **Exit** it first, or you'll just reattach to the still-running non-elevated instance.
 
 ## Configuration
 
@@ -153,5 +162,5 @@ Okay, so this part I did not cover as of publishing the source files, this will 
 - As it is right now, DLC you don't own will likely not work - I'll try and add functionality for that in and if it works, then it'll likely work the same as Goldberg does.
 - If you're trying this with a game that has the AppId hard coded in (like with Godot games) then you'll need to modify the game to set the AppId to what you need it to be. Though, you won't even need this at all if you do that lol. 
 - You cannot join VAC protected servers or servers hosted using the real AppId in Garry's Mod or other Source games or any other games that have similar protections. (GoldSrc games seemingly do not apply, as CS1.6 let me join any servers.) Please do not message me asking why you can't join any servers in Garry's Mod. Instead, ask me how you can play with your friends if they have legitimate copies. :)
-- Game won't launch, crashes on startup, or behaves like Steam isn't running? Check elevation before anything else — see [Administrator / elevation](#administrator--elevation).
+- Game won't launch, or behaves like Steam isn't running? Check elevation before anything else — a game running as admin while Steam isn't (or vice versa) will refuse to start. See [Administrator / elevation](#administrator--elevation).
 - For any other unexpected or unaccounted for issues, please contact me. I have yet to test this with every game so I will rely on the community to do so. 
