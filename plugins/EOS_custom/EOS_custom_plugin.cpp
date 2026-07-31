@@ -47,10 +47,14 @@
 // MinHook statically linked (same as the other UCOnline2 plugins).
 // ============================================================
 #include <Windows.h>
+#include <tlhelp32.h>
+#include <shlwapi.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+
+#pragma comment(lib, "shlwapi.lib")
 
 #include "../../include/MinHook.h"
 #include "../../include/uco_plugin.h"
@@ -538,11 +542,79 @@ static void __cdecl Hooked_Connect_Login(EOS_HConnect Handle, const void* Option
 }
 
 // ------------------------------------------------------------
+// Locating the EOS SDK.
+//
+// "EOSSDK-Win64-Shipping.dll" is only the Redpoint/UE convention.
+// Games rename it, ship it under a wrapper, or load a 32-bit build,
+// and matching on the name alone silently hooks nothing at all.
+//
+// So identify it by CAPABILITY instead: walk the loaded modules and
+// take the first one that actually exports EOS_Platform_Create. That
+// is what we need from it, and no non-EOS module exports it.
+// ------------------------------------------------------------
+static HMODULE FindEosModule(char* nameOut, size_t nameOutSize)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE) return nullptr;
+
+    HMODULE found = nullptr;
+    MODULEENTRY32 me = {};
+    me.dwSize = sizeof(me);
+
+    if (Module32First(snap, &me)) {
+        do {
+            HMODULE h = me.hModule;
+            if (!h) continue;
+            if (GetProcAddress(h, "EOS_Platform_Create")) {
+                found = h;
+                if (nameOut && nameOutSize) {
+                    // szModule is TCHAR; the project builds Unicode.
+                    WideCharToMultiByte(CP_UTF8, 0, me.szModule, -1,
+                                        nameOut, (int)nameOutSize, nullptr, nullptr);
+                }
+                break;
+            }
+        } while (Module32Next(snap, &me));
+    }
+
+    CloseHandle(snap);
+    return found;
+}
+
+// Diagnosis aid for the give-up path: list anything EOS-shaped that IS
+// loaded, so a game that hides the SDK somewhere unexpected is obvious.
+static void LogEosLookingModules()
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE) return;
+
+    MODULEENTRY32 me = {};
+    me.dwSize = sizeof(me);
+    int hits = 0;
+
+    if (Module32First(snap, &me)) {
+        do {
+            char name[MAX_PATH] = {};
+            WideCharToMultiByte(CP_UTF8, 0, me.szModule, -1, name, sizeof(name), nullptr, nullptr);
+            if (StrStrIA(name, "eos") || StrStrIA(name, "epic")) {
+                LOG("[EOSAuth]   loaded but no EOS_Platform_Create export: %s", name);
+                ++hits;
+            }
+        } while (Module32Next(snap, &me));
+    }
+    if (!hits)
+        LOG("[EOSAuth]   no EOS/Epic-looking module is loaded in this process at all.");
+
+    CloseHandle(snap);
+}
+
+// ------------------------------------------------------------
 // Watcher: wait for the EOS SDK module, resolve exports, hook them.
 // ------------------------------------------------------------
 static bool InstallHooks()
 {
-    HMODULE hEos = GetModuleHandleA("EOSSDK-Win64-Shipping.dll");
+    char eosName[MAX_PATH] = {};
+    HMODULE hEos = FindEosModule(eosName, sizeof(eosName));
     if (!hEos) return false; // not loaded yet
 
     void* pPlatformCreate = (void*)GetProcAddress(hEos, "EOS_Platform_Create");
@@ -577,8 +649,8 @@ static bool InstallHooks()
     else
         LOG("[EOSAuth] hook EOS_Connect_Login failed");
 
-    LOG("[EOSAuth] hooks installed (Platform_Create @ %p, Connect_Login @ %p).",
-        pPlatformCreate, pConnectLogin);
+    LOG("[EOSAuth] hooks installed in %s (Platform_Create @ %p, Connect_Login @ %p).",
+        eosName[0] ? eosName : "(unnamed module)", pPlatformCreate, pConnectLogin);
     return true;
 }
 
@@ -589,7 +661,10 @@ static DWORD WINAPI WatcherProc(LPVOID)
         if (InstallHooks()) return 0;
         Sleep(200);
     }
-    LOG("[EOSAuth] EOSSDK-Win64-Shipping.dll never loaded; nothing hooked.");
+    LOG("[EOSAuth] no module exporting EOS_Platform_Create appeared in this process; nothing hooked.");
+    LogEosLookingModules();
+    LOG("[EOSAuth]   If the game runs its online layer in a SEPARATE process, this plugin "
+        "is in the wrong one -- it only sees the exe that loaded UCOnline2's steam_api64.dll.");
     return 0;
 }
 
