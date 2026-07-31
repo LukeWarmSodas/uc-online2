@@ -56,7 +56,7 @@
 #include "../../include/uco_plugin.h"
 
 // ------------------------------------------------------------
-// Minimal EOS types (SDK 1.15.x). Only what we need to LOG.
+// Minimal EOS types (SDK 1.15.x). Only the fields we read or rewrite.
 // ------------------------------------------------------------
 typedef void* EOS_HPlatform;
 typedef void* EOS_HConnect;
@@ -295,8 +295,8 @@ static bool LooksLikeEosId(const char* s)
 }
 
 // ------------------------------------------------------------
-// Hooked EOS_Platform_Create -- log the product/sandbox/deployment/client
-// the game initializes with, then call through unchanged.
+// Hooked EOS_Platform_Create -- rewrite the product/sandbox/deployment/
+// client ids the game initializes with to point at OUR Epic app.
 // ------------------------------------------------------------
 static EOS_HPlatform __cdecl Hooked_Platform_Create(const void* Options)
 {
@@ -360,8 +360,8 @@ static EOS_HPlatform __cdecl Hooked_Platform_Create(const void* Options)
 }
 
 // ------------------------------------------------------------
-// Hooked EOS_Connect_Login -- the important one. Log the credential
-// TYPE + whether a token is present, then call through unchanged.
+// Hooked EOS_Connect_Login -- the important one. Swap the game's
+// external platform credential for an anonymous Device ID login.
 // ------------------------------------------------------------
 static const int EOS_ECT_DEVICEID_ACCESS_TOKEN = 10;
 
@@ -577,8 +577,7 @@ static bool InstallHooks()
     else
         LOG("[EOSAuth] hook EOS_Connect_Login failed");
 
-    LOG("[EOSAuth] DIAGNOSTIC hooks installed (Platform_Create @ %p, Connect_Login @ %p). "
-        "Launch + reach multiplayer, then send the log.",
+    LOG("[EOSAuth] hooks installed (Platform_Create @ %p, Connect_Login @ %p).",
         pPlatformCreate, pConnectLogin);
     return true;
 }
@@ -622,7 +621,7 @@ extern "C" __declspec(dllexport) void UCO_PluginShutdown(void)
         g_hWatcher = nullptr;
     }
     MH_DisableHook(MH_ALL_HOOKS);
-    LOG("[EOSAuth] diagnostic plugin shutdown.");
+    LOG("[EOSAuth] plugin shutdown.");
 }
 
 BOOL WINAPI DllMain(HMODULE hModule, DWORD reason, LPVOID)
