@@ -609,10 +609,80 @@ static void LogEosLookingModules()
 }
 
 // ------------------------------------------------------------
+// LoadLibrary trap.
+//
+// Forever Skies 1.17.1 (Redpoint OSS) DYNAMICALLY loads the EOS SDK and creates
+// the platform ~400ms into startup -- BEFORE a CreateThread'd watcher can even
+// be scheduled (measured: the platform booted 54ms before the watcher thread
+// armed the trap). A polling watcher therefore always loses the race, the
+// platform boots with the GAME's own Epic app, our redirect never runs, and the
+// Steam ticket is rejected exactly as if the plugin weren't there.
+//
+// So we hook LoadLibrary and arm it SYNCHRONOUSLY from DllMain (see DllMain),
+// which is ~400ms ahead of the SDK load. The moment a module that exports
+// EOS_Platform_Create finishes loading, we install our EOS hooks -- before
+// control returns to the game, so its subsequent EOS_Platform_Create is ours.
+// We hook AFTER calling the original LoadLibrary (loader lock already released),
+// so the MinHook thread-freeze there is safe. The watcher thread stays on as a
+// pure fallback poll for games the trap doesn't cover.
+// ------------------------------------------------------------
+static bool InstallHooks();               // fwd
+static volatile LONG g_bEosHooked = 0;    // set once EOS_Platform_Create is hooked
+static CRITICAL_SECTION g_InstallCs;      // serialises InstallHooks (trap vs. watcher)
+static volatile LONG g_bInstallCsReady = 0;
+
+typedef HMODULE (WINAPI* Fn_LoadLibraryExW)(LPCWSTR, HANDLE, DWORD);
+typedef HMODULE (WINAPI* Fn_LoadLibraryW)(LPCWSTR);
+static Fn_LoadLibraryExW g_orig_LoadLibraryExW = nullptr;
+static Fn_LoadLibraryW   g_orig_LoadLibraryW   = nullptr;
+
+static void TryHookAfterLoad(HMODULE m)
+{
+    if (!m) return;
+    if (InterlockedCompareExchange(&g_bEosHooked, 0, 0)) return;
+    // Cheap: did the module that just loaded bring in EOS_Platform_Create?
+    if (GetProcAddress(m, "EOS_Platform_Create")) {
+        LOG("[EOSAuth] LoadLibrary trap CAUGHT the EOS SDK load; hooking before the game can use it.");
+        InstallHooks();
+    }
+}
+
+static HMODULE WINAPI Hooked_LoadLibraryExW(LPCWSTR name, HANDLE hFile, DWORD flags)
+{
+    HMODULE m = g_orig_LoadLibraryExW(name, hFile, flags);
+    TryHookAfterLoad(m);
+    return m;
+}
+static HMODULE WINAPI Hooked_LoadLibraryW(LPCWSTR name)
+{
+    HMODULE m = g_orig_LoadLibraryW(name);
+    TryHookAfterLoad(m);
+    return m;
+}
+
+static void InstallLoadLibraryTrap()
+{
+    MH_STATUS s = MH_Initialize();
+    if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) return;
+    HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+    if (!k32) return;
+    void* pExW = (void*)GetProcAddress(k32, "LoadLibraryExW");
+    void* pW   = (void*)GetProcAddress(k32, "LoadLibraryW");
+    if (pExW && MH_CreateHook(pExW, (void*)&Hooked_LoadLibraryExW,
+                              (void**)&g_orig_LoadLibraryExW) == MH_OK)
+        MH_EnableHook(pExW);
+    if (pW && MH_CreateHook(pW, (void*)&Hooked_LoadLibraryW,
+                            (void**)&g_orig_LoadLibraryW) == MH_OK)
+        MH_EnableHook(pW);
+    LOG("[EOSAuth] LoadLibrary trap armed (catches a late/dynamic EOS SDK load in time).");
+}
+
+// ------------------------------------------------------------
 // Watcher: wait for the EOS SDK module, resolve exports, hook them.
 // ------------------------------------------------------------
-static bool InstallHooks()
+static bool InstallHooksLocked()
 {
+    if (InterlockedCompareExchange(&g_bEosHooked, 0, 0)) return true; // already done
     char eosName[MAX_PATH] = {};
     HMODULE hEos = FindEosModule(eosName, sizeof(eosName));
     if (!hEos) return false; // not loaded yet
@@ -649,13 +719,35 @@ static bool InstallHooks()
     else
         LOG("[EOSAuth] hook EOS_Connect_Login failed");
 
+    InterlockedExchange(&g_bEosHooked, 1);
     LOG("[EOSAuth] hooks installed in %s (Platform_Create @ %p, Connect_Login @ %p).",
         eosName[0] ? eosName : "(unnamed module)", pPlatformCreate, pConnectLogin);
     return true;
 }
 
+// The trap (loader thread) and the fallback watcher can both reach here at the
+// same instant; without serialisation the second one races past the g_bEosHooked
+// check and logs spurious "hook ... failed" (MinHook rejecting an already-created
+// hook). Serialise so exactly one caller does the install.
+static bool InstallHooks()
+{
+    if (InterlockedCompareExchange(&g_bEosHooked, 0, 0)) return true; // fast path
+    if (!InterlockedCompareExchange(&g_bInstallCsReady, 0, 0))
+        return InstallHooksLocked(); // CS not up yet (shouldn't happen); best-effort
+    EnterCriticalSection(&g_InstallCs);
+    bool r = InstallHooksLocked();
+    LeaveCriticalSection(&g_InstallCs);
+    return r;
+}
+
 static DWORD WINAPI WatcherProc(LPVOID)
 {
+    // The LoadLibrary trap (armed in DllMain) is the primary mechanism and
+    // catches the SDK the instant it loads. This poll is only a fallback for a
+    // game that brings the SDK in by a path the trap doesn't see, or that has
+    // it already loaded before we get here.
+    if (InstallHooks()) return 0;
+
     // Poll up to ~3 minutes for the EOS SDK to load (subdir load can be late).
     for (int i = 0; i < 900 && InterlockedCompareExchange(&g_bShutdown, 0, 0) == 0; ++i) {
         if (InstallHooks()) return 0;
@@ -704,6 +796,8 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(hModule);
+        InitializeCriticalSection(&g_InstallCs);
+        InterlockedExchange(&g_bInstallCsReady, 1);
         // Start watching for the EOS SDK IMMEDIATELY -- the game's
         // EOS_Platform_Create / first EOS_Connect_Login happen during
         // startup, before UCO_PluginInit would ever run.
@@ -713,6 +807,16 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD reason, LPVOID)
             g_Cfg.ProductId[0] ? g_Cfg.ProductId : "(unset)",
             g_Cfg.ClientId[0]  ? g_Cfg.ClientId  : "(unset)",
             g_Cfg.DisplayName);
+        // Arm the LoadLibrary trap RIGHT HERE, synchronously. Forever Skies
+        // 1.17.1 dynamic-loads the EOS SDK and creates the platform ~400ms into
+        // startup -- earlier than a freshly-CreateThread'd watcher can even get
+        // scheduled (measured: SDK booted 54ms BEFORE the thread armed the trap).
+        // Arming from DllMain (loader lock held, but MinHook only patches
+        // kernel32 code + suspends threads -- it never takes the loader lock)
+        // guarantees the trap is live long before the SDK loads. The EOS hooks
+        // themselves are still installed later from the trap callback, after the
+        // real LoadLibrary has returned and released the lock.
+        InstallLoadLibraryTrap();
         g_hWatcher = CreateThread(nullptr, 0, WatcherProc, nullptr, 0, nullptr);
     }
     return TRUE;
