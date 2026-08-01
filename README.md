@@ -29,8 +29,8 @@ UCOnline2 is a **passthrough** — the real Steam client has to be running, and 
 |---|---|---|
 | normal | normal | ✅ works — the usual setup |
 | **admin** | **admin** | ✅ works — use this when the game needs admin |
-| normal | admin | ❌ game refuses to launch |
-| admin | normal | ❌ same problem, other way round |
+| normal | admin | ✅ Most of the time works |
+| admin | normal | ❌ Won't work since game can't hook into steam |
 
 A mismatch typically looks like the game refusing to start at all, an init/auth failure, or the game behaving as though Steam isn't running.
 
