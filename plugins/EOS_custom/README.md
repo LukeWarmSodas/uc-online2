@@ -35,14 +35,15 @@ Two hooks on the **genuine Epic** `EOSSDK-Win64-Shipping.dll`:
 
 Device ID login requires a device id to already exist, so the plugin calls `EOS_Connect_CreateDeviceId` once on the first attempt and lets the game's own login retry loop (these games re-attempt every few seconds) succeed on a later pass.
 
-## Confirmed working
+## Known working
 
 | Game | Steam AppId | Notes |
 |---|---|---|
 | **Forever Skies** | 1641960 | Redpoint EOS Online Framework (`RedpointSteam` OSS). Uses EOS **Sessions**. Remote co-op over Epic's relay. |
 | **Palworld** | 1623730 | Dual-stack Steam + EOS with its own integration, built on EOS **Lobbies**. Verified on the **1.0 release** and on the older `0.7.3.90464` build. |
+| **Subnautica 2** | 1962700 | **Community-reported**, not verified first-hand. No details on the EOS mechanism, tested build or SDK version — treat as a strong lead rather than a guarantee. |
 
-These use EOS very differently on top of the same login — Redpoint Sessions vs. raw Lobbies — and both are fixed by the same two hooks, because the hooks are on the **EOS SDK itself**, not on any game code. Expect this to work for most EOS titles that log in with a platform (Steam) credential.
+Forever Skies and Palworld use EOS very differently on top of the same login — Redpoint Sessions vs. raw Lobbies — and both are fixed by the same two hooks, because the hooks are on the **EOS SDK itself**, not on any game code. Expect this to work for most EOS titles that log in with a platform (Steam) credential.
 
 They also span **two different SDK builds** (Forever Skies and old Palworld ship a byte-identical 1.15.5; Palworld 1.0 reports `EOS_Platform_Options` `ApiVersion=12`), and the same offsets resolved the game's real IDs in both — EOS appends fields rather than reordering them. Still worth a sanity check on a much newer SDK: if the `[EOSAuth]` log prints the game's original IDs as valid 32-hex strings, the layout matched.
 
