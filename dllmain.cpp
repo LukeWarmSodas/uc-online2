@@ -1348,22 +1348,25 @@ static uint32 S_CALLTYPE Hooked_GetAppID(void* pThis)
 // The blob is shaped so a peer running this same code can sanity-check it: the
 // first fields are a magic value, the ogAppId and our SteamID.
 // ============================================================
-typedef HAuthTicket (S_CALLTYPE *Fn_GetAuthSessionTicket)(void*, void*, int, uint32*, const SteamNetworkingIdentity*);
-typedef EBeginAuthSessionResult (S_CALLTYPE *Fn_BeginAuthSession)(void*, const void*, int, CSteamID);
-typedef void (S_CALLTYPE *Fn_EndAuthSession)(void*, CSteamID);
-typedef void (S_CALLTYPE *Fn_CancelAuthTicket)(void*, HAuthTicket);
+// No original function pointers here on purpose: these detours fully replace
+// the originals and are only installed when emulation is on, so nothing ever
+// calls through. That is what lets several ISteamUser versions be hooked
+// without a trampoline set per version.
+static volatile LONG g_NextAuthTicket = 0;
 
-static Fn_GetAuthSessionTicket g_pfnOrigGetAuthSessionTicket = nullptr;
-static Fn_BeginAuthSession     g_pfnOrigBeginAuthSession     = nullptr;
-static Fn_EndAuthSession       g_pfnOrigEndAuthSession       = nullptr;
-static Fn_CancelAuthTicket     g_pfnOrigCancelAuthTicket     = nullptr;
-static volatile LONG           g_NextAuthTicket              = 0;
-
-static HAuthTicket S_CALLTYPE Hooked_GetAuthSessionTicket(void* pThis, void* pTicket, int cbMaxTicket,
-                                                          uint32* pcbTicket, const SteamNetworkingIdentity* pIdentity)
+// The detours fully REPLACE the originals -- they are only installed when
+// emulation is on, and never call through. That is what makes it safe to hook
+// several ISteamUser objects (the game can hold more than one interface
+// version) without a trampoline per version.
+static HAuthTicket UcoEmitAuthTicket(void* pTicket, int cbMaxTicket, uint32* pcbTicket)
 {
-    if (!g_bEmulateAuthTicket || !pTicket || cbMaxTicket < 64)
-        return g_pfnOrigGetAuthSessionTicket(pThis, pTicket, cbMaxTicket, pcbTicket, pIdentity);
+    if (!pTicket || cbMaxTicket < 64)
+    {
+        UCOLOG("[UCOnline2] GetAuthSessionTicket: buffer too small (%d) -- returning invalid handle",
+            cbMaxTicket);
+        if (pcbTicket) *pcbTicket = 0;
+        return k_HAuthTicketInvalid;
+    }
 
     uint64 steamId = 0;
     if (g_ClientCtx.SteamUser())
@@ -1399,12 +1402,27 @@ static HAuthTicket S_CALLTYPE Hooked_GetAuthSessionTicket(void* pThis, void* pTi
     return handle;
 }
 
+// SteamUser021 takes three arguments; 022 and later added the networking
+// identity. Same body, two entry points -- calling through the wrong arity
+// would corrupt the call.
+static HAuthTicket S_CALLTYPE Hooked_GetAuthSessionTicket3(void* pThis, void* pTicket,
+                                                           int cbMaxTicket, uint32* pcbTicket)
+{
+    (void)pThis;
+    return UcoEmitAuthTicket(pTicket, cbMaxTicket, pcbTicket);
+}
+
+static HAuthTicket S_CALLTYPE Hooked_GetAuthSessionTicket4(void* pThis, void* pTicket,
+                                                           int cbMaxTicket, uint32* pcbTicket,
+                                                           const void* pIdentity)
+{
+    (void)pThis; (void)pIdentity;
+    return UcoEmitAuthTicket(pTicket, cbMaxTicket, pcbTicket);
+}
+
 static EBeginAuthSessionResult S_CALLTYPE Hooked_BeginAuthSession(void* pThis, const void* pAuthTicket,
                                                                   int cbAuthTicket, CSteamID steamID)
 {
-    if (!g_bEmulateAuthTicket)
-        return g_pfnOrigBeginAuthSession(pThis, pAuthTicket, cbAuthTicket, steamID);
-
     // Accept, then answer the ValidateAuthTicketResponse_t the caller waits on;
     // returning OK alone leaves a host stuck on "authenticating".
     ValidateAuthTicketResponse_t resp = {};
@@ -1422,15 +1440,119 @@ static EBeginAuthSessionResult S_CALLTYPE Hooked_BeginAuthSession(void* pThis, c
 
 static void S_CALLTYPE Hooked_EndAuthSession(void* pThis, CSteamID steamID)
 {
-    if (!g_bEmulateAuthTicket) { g_pfnOrigEndAuthSession(pThis, steamID); return; }
     UCOLOG("[UCOnline2] EndAuthSession emulated for %llu",
         (unsigned long long)steamID.ConvertToUint64());
 }
 
 static void S_CALLTYPE Hooked_CancelAuthTicket(void* pThis, HAuthTicket hAuthTicket)
 {
-    if (!g_bEmulateAuthTicket) { g_pfnOrigCancelAuthTicket(pThis, hAuthTicket); return; }
     UCOLOG("[UCOnline2] CancelAuthTicket emulated for handle=%u", hAuthTicket);
+}
+
+
+// ------------------------------------------------------------
+// Per-interface auth hook installation.
+//
+// WHY THIS IS NOT A ONE-LINER
+// We ask Steam for SteamUser023, but a game may ask for an older version --
+// Farming Simulator 25 uses SteamUser021. Steam returns a SEPARATE adapter
+// object per version, each with its own vtable, so hooks installed on our
+// object are never reached by the game. The symptom is silent: the hooks report
+// as installed and simply never fire.
+//
+// Worse, the layout MOVES between versions, so hooking the game's object with
+// our version's indices would detour the wrong functions entirely:
+//
+//   version  GetAuthSessionTicket   Begin  End  Cancel
+//   021      13  (three args)       14     15   16
+//   022      13  (four args)        14     15   16
+//   023      13  (four args)        15     16   17
+//
+// 023 inserted GetAuthTicketForWebApi at 14 and pushed the rest down; 021
+// predates the networking-identity argument. Using 023 indices on a 021 object
+// would put a CancelAuthTicket detour on UserHasLicenseForApp.
+//
+// So: resolve the layout from the version string, and refuse to guess for
+// versions not listed. A missed hook is a bug report; a wrong hook is a crash.
+// ------------------------------------------------------------
+struct UcoUserAuthLayout
+{
+    int  getTicket;
+    int  begin;
+    int  end;
+    int  cancel;
+    bool ticketTakesIdentity;
+};
+
+static bool UcoUserAuthLayoutFor(const char* ver, UcoUserAuthLayout& out)
+{
+    if (!ver || _strnicmp(ver, "SteamUser", 9) != 0)
+        return false;
+    const int n = atoi(ver + 9);
+    if (n == 21) { out.getTicket = 13; out.begin = 14; out.end = 15; out.cancel = 16; out.ticketTakesIdentity = false; return true; }
+    if (n == 22) { out.getTicket = 13; out.begin = 14; out.end = 15; out.cancel = 16; out.ticketTakesIdentity = true;  return true; }
+    if (n >= 23) { out.getTicket = 13; out.begin = 15; out.end = 16; out.cancel = 17; out.ticketTakesIdentity = true;  return true; }
+    return false;   // 020 and older: layouts not verified, so do not touch them
+}
+
+void UcoInstallUserAuthHooks(void* pIface, const char* ver)
+{
+    if (!g_bEmulateAuthTicket || !pIface || !ver)
+        return;
+
+    UcoUserAuthLayout L = {};
+    if (!UcoUserAuthLayoutFor(ver, L))
+    {
+        if (_strnicmp(ver, "SteamUser", 9) == 0)
+            UCOLOG("[UCOnline2] %s: auth vtable layout unknown -- NOT hooking "
+                   "(guessing an index would detour the wrong function)", ver);
+        return;
+    }
+
+    // One object may be handed out repeatedly; hook each vtable once.
+    static void* s_seen[8] = {};
+    static int   s_seenCount = 0;
+    void** vt = *reinterpret_cast<void***>(pIface);
+    for (int i = 0; i < s_seenCount; ++i)
+        if (s_seen[i] == (void*)vt)
+            return;
+    if (s_seenCount < (int)(sizeof(s_seen) / sizeof(s_seen[0])))
+        s_seen[s_seenCount++] = (void*)vt;
+
+    MH_Initialize();
+
+    void* getTicketDetour = L.ticketTakesIdentity
+                          ? (void*)&Hooked_GetAuthSessionTicket4
+                          : (void*)&Hooked_GetAuthSessionTicket3;
+
+    struct Item { int index; void* detour; const char* name; };
+    const Item items[] = {
+        { L.getTicket, getTicketDetour,             "GetAuthSessionTicket" },
+        { L.begin,     (void*)&Hooked_BeginAuthSession, "BeginAuthSession" },
+        { L.end,       (void*)&Hooked_EndAuthSession,   "EndAuthSession" },
+        { L.cancel,    (void*)&Hooked_CancelAuthTicket, "CancelAuthTicket" },
+    };
+
+    int ok = 0;
+    for (const Item& it : items)
+    {
+        void* target = vt[it.index];
+        void* dummyOriginal = nullptr;             // detours never call through
+        MH_STATUS st = MH_CreateHook(target, it.detour, &dummyOriginal);
+        if (st == MH_ERROR_ALREADY_CREATED)        // shared impl across versions
+        {
+            ++ok;
+            continue;
+        }
+        if (st == MH_OK && MH_EnableHook(target) == MH_OK)
+            ++ok;
+        else
+            UCOLOG("[UCOnline2] %s: failed to hook %s (vtable[%d]): %d",
+                ver, it.name, it.index, st);
+    }
+
+    UCOLOG("[UCOnline2] auth ticket emulation: %d/4 hooks installed on %s%s",
+        ok, ver, L.ticketTakesIdentity ? "" : " (3-arg ticket variant)");
 }
 
 void InstallSteamSpoofHooks()
@@ -1517,36 +1639,12 @@ void InstallSteamSpoofHooks()
             UcoDlcStore::UnlockAll() ? 1 : 0, UcoDlcStore::Count());
     }
 
-    // ISteamUser vtable, declaration order from include/sdk/isteamuser.h.
-    // Safe to index because api_client.h pins SteamUser023.
-    //   13:GetAuthSessionTicket  14:GetAuthTicketForWebApi
-    //   15:BeginAuthSession      16:EndAuthSession      17:CancelAuthTicket
+    // ISteamUser auth hooks are installed per-interface, not here -- see
+    // UcoInstallUserAuthHooks. The game frequently uses a DIFFERENT interface
+    // version than the one we hold, and each version is a separate object with
+    // its own vtable, so hooking only ours silently misses every call.
     if (g_bEmulateAuthTicket && g_ClientCtx.SteamUser())
-    {
-        void** userVT = *reinterpret_cast<void***>(g_ClientCtx.SteamUser());
-
-        struct UserHook { int index; void* detour; void** original; const char* name; };
-        const UserHook uhooks[] = {
-            { 13, &Hooked_GetAuthSessionTicket, (void**)&g_pfnOrigGetAuthSessionTicket, "GetAuthSessionTicket" },
-            { 15, &Hooked_BeginAuthSession,     (void**)&g_pfnOrigBeginAuthSession,     "BeginAuthSession" },
-            { 16, &Hooked_EndAuthSession,       (void**)&g_pfnOrigEndAuthSession,       "EndAuthSession" },
-            { 17, &Hooked_CancelAuthTicket,     (void**)&g_pfnOrigCancelAuthTicket,     "CancelAuthTicket" },
-        };
-
-        int ok = 0;
-        for (const UserHook& h : uhooks)
-        {
-            void* target = userVT[h.index];
-            MH_STATUS st = MH_CreateHook(target, h.detour, h.original);
-            if (st == MH_OK && MH_EnableHook(target) == MH_OK)
-                ++ok;
-            else
-                UCOLOG("[UCOnline2] failed to hook ISteamUser::%s (vtable[%d]): %d",
-                    h.name, h.index, st);
-        }
-        UCOLOG("[UCOnline2] auth ticket emulation: %d/%d hooks installed",
-            ok, (int)(sizeof(uhooks) / sizeof(uhooks[0])));
-    }
+        UcoInstallUserAuthHooks(g_ClientCtx.SteamUser(), STEAMUSER_INTERFACE_VERSION);
 }
 
 static void SteamStub_Init()

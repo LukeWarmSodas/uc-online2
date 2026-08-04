@@ -80,7 +80,13 @@ S_API void* S_CALLTYPE SteamInternal_FindOrCreateUserInterface(HSteamUser hUser,
 		{
 			void* pIface = g_pSteamClient->GetISteamGenericInterface(hUser, g_ClientPipe, ver);
 			if (pIface)
+			{
+				// The game may take an older ISteamUser than the one we hold, and
+				// that is a different object with a different vtable -- so hook the
+				// instance actually being handed out, not just ours.
+				UcoInstallUserAuthHooks(pIface, ver);
 				return pIface;
+			}
 
 			// Steamworks.NET 20.x CSteamAPIContext.Init() null-checks
 			// every interface and returns false if ANY is missing.

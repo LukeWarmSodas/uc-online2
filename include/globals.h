@@ -323,6 +323,11 @@ public:
 
 extern CSteamAPIContext g_ClientCtx;
 
+// Installs auth-ticket hooks on whichever ISteamUser version the caller was
+// handed. Defined in dllmain.cpp; declared here so the interface factory can
+// call it as interfaces are created.
+void UcoInstallUserAuthHooks(void* pIface, const char* ver);
+
 class CSteamAppsStub : public ISteamApps
 {
 public:
