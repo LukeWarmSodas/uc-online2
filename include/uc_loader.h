@@ -53,13 +53,67 @@ public:
 	// Path to union-crax.ini, or "" when it wasn't found next to the exe.
 	const char* GetIniPath() const { return m_IniPath; }
 
+
+	// ------------------------------------------------------------
+	// INI value reading.
+	//
+	// GetPrivateProfileString does NOT strip inline comments -- Windows only
+	// treats ';' at the START of a line as a comment. So
+	//     EmulateTicket=true  # Enable ticket emulation
+	// reads back as the whole string "true  # Enable ticket emulation", and an
+	// exact compare against "true" fails. That silently disabled EmulateTicket
+	// for anyone who copied the commented example out of the README -- the
+	// feature reported nothing, it simply never armed.
+	//
+	// A comment is only recognised when the '#' or ';' is preceded by
+	// whitespace, so a value that legitimately contains one (a path, a key)
+	// survives intact.
+	// ------------------------------------------------------------
+	static void IniCleanValue(char* v)
+	{
+		if (!v) return;
+		for (char* c = v; *c; ++c)
+		{
+			if ((*c == '#' || *c == ';') && c > v && (c[-1] == ' ' || c[-1] == '\t'))
+			{
+				*c = '\0';
+				break;
+			}
+		}
+		size_t n = strlen(v);
+		while (n && (v[n - 1] == ' ' || v[n - 1] == '\t' || v[n - 1] == '\r' || v[n - 1] == '\n'))
+			v[--n] = '\0';
+		char* q = v;
+		while (*q == ' ' || *q == '\t') ++q;
+		if (q != v) memmove(v, q, strlen(q) + 1);
+	}
+
+	// Reads a value with comments and surrounding whitespace removed. The buffer
+	// is sized for the RAW line, not the value, so a long trailing comment can
+	// never truncate the value itself.
+	void IniReadString(const char* key, const char* def, char* out, size_t cch) const
+	{
+		char raw[512] = { 0 };
+		GetPrivateProfileStringA("Settings", key, def, raw, sizeof(raw), m_IniPath);
+		IniCleanValue(raw);
+		strncpy_s(out, cch, raw, _TRUNCATE);
+	}
+
+	bool IniReadBool(const char* key, bool def) const
+	{
+		char v[64] = { 0 };
+		IniReadString(key, def ? "true" : "false", v, sizeof(v));
+		return (_stricmp(v, "true") == 0 || _stricmp(v, "1") == 0 ||
+		        _stricmp(v, "yes") == 0  || _stricmp(v, "on") == 0);
+	}
+
  	uint32 GetAppId()
  	{
  		if (m_IniPath[0] == '\0')
  			return 480;
 
- 		char buf[16] = { 0 };
- 		GetPrivateProfileStringA("Settings", "AppId", "480", buf, sizeof(buf), m_IniPath);
+ 		char buf[64] = { 0 };
+ 		IniReadString("AppId", "480", buf, sizeof(buf));
 
  		if (buf[0] == '\0')
  			return 480;
@@ -73,8 +127,8 @@ uint32 GetOgAppId()
   		if (m_IniPath[0] == '\0')
   	        return 0;
 
-  		char buf[16] = { 0 };
-  		GetPrivateProfileStringA("Settings", "ogAppId", "", buf, sizeof(buf), m_IniPath);
+  		char buf[64] = { 0 };
+  		IniReadString("ogAppId", "", buf, sizeof(buf));
 
   		if (buf[0] == '\0')
   			return 0;
@@ -90,7 +144,7 @@ uint32 GetOgAppId()
 			return appIds;
 
 		char buf[1024] = { 0 };
-		GetPrivateProfileStringA("Settings", "UnlockDLC", "", buf, sizeof(buf), m_IniPath);
+		IniReadString("UnlockDLC", "", buf, sizeof(buf));
 
 		if (buf[0] == '\0')
 			return appIds;
@@ -116,10 +170,7 @@ uint32 GetOgAppId()
 		if (m_IniPath[0] == '\0')
 			return false;
 
-		char buf[8] = { 0 };
-		GetPrivateProfileStringA("Settings", "EmulateTicket", "false", buf, sizeof(buf), m_IniPath);
-
-		return (_stricmp(buf, "true") == 0 || _stricmp(buf, "1") == 0 || _stricmp(buf, "yes") == 0);
+		return IniReadBool("EmulateTicket", false);
 	}
 
 	bool GetSteamStubEnabled()
@@ -127,10 +178,7 @@ uint32 GetOgAppId()
 		if (m_IniPath[0] == '\0')
 			return false;
 
-		char buf[8] = { 0 };
-		GetPrivateProfileStringA("Settings", "GetStubbedLol", "false", buf, sizeof(buf), m_IniPath);
-
-		return (_stricmp(buf, "true") == 0 || _stricmp(buf, "1") == 0 || _stricmp(buf, "yes") == 0);
+		return IniReadBool("GetStubbedLol", false);
 	}
 
 	// [Settings] VerboseLog=true re-enables the very chatty per-frame /
@@ -142,10 +190,7 @@ uint32 GetOgAppId()
 		if (m_IniPath[0] == '\0')
 			return false;
 
-		char buf[8] = { 0 };
-		GetPrivateProfileStringA("Settings", "VerboseLog", "false", buf, sizeof(buf), m_IniPath);
-
-		return (_stricmp(buf, "true") == 0 || _stricmp(buf, "1") == 0 || _stricmp(buf, "yes") == 0);
+		return IniReadBool("VerboseLog", false);
 	}
 
 	// This does not need to be set!! It will automatically run as true!!
@@ -154,9 +199,7 @@ uint32 GetOgAppId()
     	if (m_IniPath[0] == '\0')
         	return true;
     
-    	char buf[8] = { 0 };
-    		GetPrivateProfileStringA("Settings", "ForceOwnership", "true", buf, sizeof(buf), m_IniPath);
-    	return (_stricmp(buf, "true") == 0);
+    	return IniReadBool("ForceOwnership", true);
 	}
 
 	void LoadPlugins()
@@ -169,7 +212,7 @@ uint32 GetOgAppId()
 		PathRemoveFileSpecA(exeDir);
 
 		char folderName[MAX_PATH] = { 0 };
-		GetPrivateProfileStringA("Settings", "PluginsFolder", "", folderName, MAX_PATH, m_IniPath);
+		IniReadString("PluginsFolder", "", folderName, MAX_PATH);
 
 		if (folderName[0] == '\0')
 			return;
