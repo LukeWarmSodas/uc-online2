@@ -109,7 +109,22 @@ To check what was picked up, look in `%TEMP%/uc_online2.log` for:
 
 ## Emulate Encrypted App Ticket
 
-The `EmulateTicket` setting enables encrypted app ticket emulation for multiplayer authentication. When enabled, it uses the `ogAppId` setting (or `AppId` if `ogAppId` is not set) to respond to `UserHasLicenseForApp` checks and provide fake encrypted app tickets via `GetEncryptedAppTicket`.
+The `EmulateTicket` setting covers **both** kinds of Steam ticket a game may ask for:
+
+- **Encrypted app ticket** — `GetEncryptedAppTicket` / `RequestEncryptedAppTicket`, plus `UserHasLicenseForApp` ownership checks, answered for `ogAppId` (or `AppId` if unset).
+- **Auth session ticket** — `GetAuthSessionTicket`, which is what most games use to prove identity to a host. Previously this passed straight through to real Steam, which mints the ticket under the *spoofed* AppId, so the host rejected it. The tell in the log is the game registering callback `163` (`GetAuthSessionTicketResponse_t`) repeatedly: asking for a ticket, never getting a usable one, retrying.
+
+`BeginAuthSession` / `EndAuthSession` / `CancelAuthTicket` are emulated to match, and the response callbacks (`GetAuthSessionTicketResponse_t`, `ValidateAuthTicketResponse_t`) are delivered — a game that *waits* on those would otherwise hang even with a valid-looking ticket.
+
+This works because the check is **peer-side**: both players run the emulator, so one mints the ticket and the other accepts it. It does **not** help where a publisher's own server asks Steam to validate the ticket — that is server-side and unforgeable, no matter what the client does.
+
+Look for this in `%TEMP%/uc_online2.log`:
+
+```
+[UCOnline2] auth ticket emulation: 4/4 hooks installed
+[UCOnline2] GetAuthSessionTicket emulated -> handle=1 appid=2300320 size=64
+[UCOnline2] BeginAuthSession emulated -> OK for 7656119... (64 byte ticket)
+```
 
 I really didn't know how to actually go about this, sorry - I used AI to try and finish what I had gotten through with it. I don't know how OFME utilizes it, but I can assume it actually is a ticket emulation system which is what I tried to make. But, I don't want it to _not_ work due to it being emulated, or too emulated, if this makes sense at all. I don't want to deviate too much and have this not work at all.
 Speaking of which, I can't say for certain if this function would actually work or not, I will rely on the community to find out about that from testing for me. Sorry to throw that on y'all like this. ^^;

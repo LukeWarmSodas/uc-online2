@@ -88,6 +88,9 @@ bool g_bHaveInstallPath = false;
 SRWLOCK g_CallbackLock;
 uint32 g_ForcedAppId = 480;
 uint32 g_OriginalAppId = 0;
+// [Settings] EmulateTicket -- also gates auth-session-ticket emulation
+// (see the ISteamUser hooks further down).
+static bool g_bEmulateAuthTicket = false;
 
 Fn_CreateInterface g_pfnCreateInterface = nullptr;
 Fn_ReleaseThreadLocal g_pfnReleaseThreadLocal = nullptr;
@@ -379,6 +382,7 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 			UcoDlcStore::UnlockAll() ? 1 : 0, UcoDlcStore::Count(),
 			UcoDlcStore::Count() == 1 ? "y" : "ies");
 
+		g_bEmulateAuthTicket = s_PluginLoader.GetEmulateTicketEnabled();
 		if (s_PluginLoader.GetEmulateTicketEnabled()) {
 			uint32 emulatedAppId = s_PluginLoader.GetOgAppId();
 			if (emulatedAppId == 0) emulatedAppId = s_PluginLoader.GetAppId();
@@ -557,8 +561,105 @@ void CCallbackDispatcher::ExecuteCallResult(HSteamPipe hPipe, SteamAPICall_t hCa
 	}
 }
 
+// ------------------------------------------------------------
+// Synthetic callbacks.
+//
+// Emulating an API call is only half the job: games that call an async Steam
+// function register its response callback and block on it. Real Steam will
+// never send a response for a call we answered ourselves, so we have to deliver
+// it. This is the only path by which a callback we invented reaches the game.
+//
+// Delivery happens on whichever thread drives SteamAPI_RunCallbacks, under the
+// same lock and the same matching rules as a real callback, so a game cannot
+// tell the difference.
+// ------------------------------------------------------------
+void CCallbackDispatcher::PostCallback(int iCallback, const void* pvData, size_t cubData,
+                                       HSteamUser user, bool bServer, unsigned delayMs)
+{
+	CDispatcherLock lock(&m_MapLock);
+	UcoPendingCallback pending;
+	pending.iCallback = iCallback;
+	pending.user      = user;
+	pending.bServer   = bServer;
+	pending.dueTick   = GetTickCount64() + delayMs;
+	if (pvData && cubData)
+		pending.data.assign((const uint8_t*)pvData, (const uint8_t*)pvData + cubData);
+	m_Synthetic.push_back(pending);
+	UCOLOG("[UCOnline2] queued synthetic callback -> %d size=%zu delay=%ums",
+		iCallback, cubData, delayMs);
+}
+
+// Find the one registered callback that should receive this id and run it.
+// Extracted from DispatchFrame so real and synthetic delivery cannot drift
+// apart. The caller must already hold m_MapLock.
+bool CCallbackDispatcher::DispatchToTarget(int iCallback, void* pvData, uint32 cubData,
+                                           HSteamUser user, bool bServer)
+{
+	CCallbackBase* pTarget = nullptr;
+	bool bServerCb = false;
+
+	for (auto it = m_CallbackMap.begin(); it != m_CallbackMap.end(); ++it)
+	{
+		CCallbackBase* pCb = it->second;
+		if (!pCb)
+			continue;
+
+		if (it->first == iCallback && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsRegistered))
+		{
+			if (user == g_ServerUser && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && bServer)
+			{
+				pTarget = pCb; bServerCb = true; break;
+			}
+			else if (user == g_ClientUser && !(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && !bServer)
+			{
+				pTarget = pCb; bServerCb = false; break;
+			}
+		}
+	}
+
+	if (!pTarget)
+		return false;
+
+	(void)bServerCb;
+	pTarget->Run(pvData);
+	return true;
+}
+
+void CCallbackDispatcher::DrainSynthetic(bool bServer)
+{
+	// Snapshot the due entries under the lock, then dispatch them still holding
+	// it -- same discipline as DispatchFrame, so a callback cannot be destroyed
+	// mid-Run() by a concurrent unregister.
+	CDispatcherLock lock(&m_MapLock);
+	if (m_Synthetic.empty())
+		return;
+
+	const ULONGLONG now = GetTickCount64();
+	for (size_t i = 0; i < m_Synthetic.size(); )
+	{
+		UcoPendingCallback& p = m_Synthetic[i];
+		if (p.bServer != bServer || now < p.dueTick)
+		{
+			++i;
+			continue;
+		}
+
+		UcoPendingCallback fire = p;                 // copy: the vector is edited below
+		m_Synthetic.erase(m_Synthetic.begin() + (ptrdiff_t)i);
+
+		const bool ran = DispatchToTarget(fire.iCallback, fire.data.empty() ? nullptr : fire.data.data(),
+		                                  (uint32)fire.data.size(), fire.user, fire.bServer);
+		UCOLOG("[UCOnline2] synthetic callback -> %d %s",
+			fire.iCallback, ran ? "delivered" : "DROPPED (nothing registered for it)");
+	}
+}
+
 void CCallbackDispatcher::DispatchFrame(HSteamPipe hPipe, bool bServer)
 {
+	// Before the early return below: Steam having nothing pending must not stop
+	// our own queued callbacks from being delivered.
+	DrainSynthetic(bServer);
+
 	if (!m_pfnBGetCallback || !m_pfnFreeLastCallback || !m_pfnGetAPICallResult)
 		return;
 
@@ -664,6 +765,8 @@ void CCallbackDispatcher::DispatchFrame(HSteamPipe hPipe, bool bServer)
 
 void CCallbackDispatcher::DispatchFrameSafe(HSteamPipe hPipe, bool bServer)
 {
+	try { DrainSynthetic(bServer); } catch (...) { }
+
 	if (!m_pfnBGetCallback || !m_pfnFreeLastCallback || !m_pfnGetAPICallResult)
 		return;
 
@@ -1224,19 +1327,127 @@ static uint32 S_CALLTYPE Hooked_GetAppID(void* pThis)
     return g_OriginalAppId;
 }
 
+
+// ============================================================
+// Auth session ticket emulation ([Settings] EmulateTicket).
+//
+// WHY
+// Games that gate multiplayer on Steam identity call
+// ISteamUser::GetAuthSessionTicket, send the blob to the host, and the host
+// calls BeginAuthSession on it. Passed through, real Steam mints that ticket
+// under the SPOOFED AppId (480), so it does not describe the game being played
+// and the peer rejects it. In a log this shows up as the game registering
+// GetAuthSessionTicketResponse_t (callback 163) over and over -- asking for a
+// ticket, not getting a usable one, retrying.
+//
+// This is emulatable precisely BECAUSE the check is peer-side rather than
+// Valve-side: both players run the same emulator, so one side mints the ticket
+// and the other accepts it. Contrast a publisher backend that asks Steam to
+// validate server-side -- that is unforgeable and no local emulation helps.
+//
+// The blob is shaped so a peer running this same code can sanity-check it: the
+// first fields are a magic value, the ogAppId and our SteamID.
+// ============================================================
+typedef HAuthTicket (S_CALLTYPE *Fn_GetAuthSessionTicket)(void*, void*, int, uint32*, const SteamNetworkingIdentity*);
+typedef EBeginAuthSessionResult (S_CALLTYPE *Fn_BeginAuthSession)(void*, const void*, int, CSteamID);
+typedef void (S_CALLTYPE *Fn_EndAuthSession)(void*, CSteamID);
+typedef void (S_CALLTYPE *Fn_CancelAuthTicket)(void*, HAuthTicket);
+
+static Fn_GetAuthSessionTicket g_pfnOrigGetAuthSessionTicket = nullptr;
+static Fn_BeginAuthSession     g_pfnOrigBeginAuthSession     = nullptr;
+static Fn_EndAuthSession       g_pfnOrigEndAuthSession       = nullptr;
+static Fn_CancelAuthTicket     g_pfnOrigCancelAuthTicket     = nullptr;
+static volatile LONG           g_NextAuthTicket              = 0;
+
+static HAuthTicket S_CALLTYPE Hooked_GetAuthSessionTicket(void* pThis, void* pTicket, int cbMaxTicket,
+                                                          uint32* pcbTicket, const SteamNetworkingIdentity* pIdentity)
+{
+    if (!g_bEmulateAuthTicket || !pTicket || cbMaxTicket < 64)
+        return g_pfnOrigGetAuthSessionTicket(pThis, pTicket, cbMaxTicket, pcbTicket, pIdentity);
+
+    uint64 steamId = 0;
+    if (g_ClientCtx.SteamUser())
+        steamId = g_ClientCtx.SteamUser()->GetSteamID().ConvertToUint64();
+
+    const uint32 appId = g_OriginalAppId ? g_OriginalAppId : g_ForcedAppId;
+    uint8_t* p = (uint8_t*)pTicket;
+    memset(p, 0, (size_t)cbMaxTicket);
+
+    const uint32 magic = 0x554F4B54;                 /* 'UOKT' */
+    memcpy(p +  0, &magic,   sizeof(magic));
+    memcpy(p +  4, &appId,   sizeof(appId));
+    memcpy(p +  8, &steamId, sizeof(steamId));
+    const uint32 stamp = (uint32)time(nullptr);
+    memcpy(p + 16, &stamp,   sizeof(stamp));
+
+    const uint32 cb = 64;
+    if (pcbTicket) *pcbTicket = cb;
+
+    const HAuthTicket handle = (HAuthTicket)InterlockedIncrement(&g_NextAuthTicket);
+
+    // The game waits on this; without it the request looks like it never
+    // completed and the game retries forever.
+    GetAuthSessionTicketResponse_t resp = {};
+    resp.m_hAuthTicket = handle;
+    resp.m_eResult     = k_EResultOK;
+    if (GetDispatcher())
+        GetDispatcher()->PostCallback(GetAuthSessionTicketResponse_t::k_iCallback,
+            &resp, sizeof(resp), g_ClientUser, false, 10);
+
+    UCOLOG("[UCOnline2] GetAuthSessionTicket emulated -> handle=%u appid=%u size=%u",
+        handle, appId, cb);
+    return handle;
+}
+
+static EBeginAuthSessionResult S_CALLTYPE Hooked_BeginAuthSession(void* pThis, const void* pAuthTicket,
+                                                                  int cbAuthTicket, CSteamID steamID)
+{
+    if (!g_bEmulateAuthTicket)
+        return g_pfnOrigBeginAuthSession(pThis, pAuthTicket, cbAuthTicket, steamID);
+
+    // Accept, then answer the ValidateAuthTicketResponse_t the caller waits on;
+    // returning OK alone leaves a host stuck on "authenticating".
+    ValidateAuthTicketResponse_t resp = {};
+    resp.m_SteamID              = steamID;
+    resp.m_eAuthSessionResponse = k_EAuthSessionResponseOK;
+    resp.m_OwnerSteamID         = steamID;
+    if (GetDispatcher())
+        GetDispatcher()->PostCallback(ValidateAuthTicketResponse_t::k_iCallback,
+            &resp, sizeof(resp), g_ClientUser, false, 10);
+
+    UCOLOG("[UCOnline2] BeginAuthSession emulated -> OK for %llu (%d byte ticket)",
+        (unsigned long long)steamID.ConvertToUint64(), cbAuthTicket);
+    return k_EBeginAuthSessionResultOK;
+}
+
+static void S_CALLTYPE Hooked_EndAuthSession(void* pThis, CSteamID steamID)
+{
+    if (!g_bEmulateAuthTicket) { g_pfnOrigEndAuthSession(pThis, steamID); return; }
+    UCOLOG("[UCOnline2] EndAuthSession emulated for %llu",
+        (unsigned long long)steamID.ConvertToUint64());
+}
+
+static void S_CALLTYPE Hooked_CancelAuthTicket(void* pThis, HAuthTicket hAuthTicket)
+{
+    if (!g_bEmulateAuthTicket) { g_pfnOrigCancelAuthTicket(pThis, hAuthTicket); return; }
+    UCOLOG("[UCOnline2] CancelAuthTicket emulated for handle=%u", hAuthTicket);
+}
+
 void InstallSteamSpoofHooks()
 {
-    if (g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
-    {
-        UCOLOG("[UCOnline2] Skipping spoof hooks: no ogAppId or same as AppId");
-        return;
-    }
-
     if (!g_bClientReady)
     {
         UCOLOG("[UCOnline2] Cannot install spoof hooks: client not ready");
         return;
     }
+
+    // Only the AppId spoof needs ogAppId. DLC unlocking and ticket emulation do
+    // not, and used to be skipped along with it by a single early return -- so
+    // configuring [DLC] without an ogAppId silently did nothing at all.
+    const bool bSpoofAppId = (g_OriginalAppId != 0 && g_OriginalAppId != g_ForcedAppId);
+    if (!bSpoofAppId)
+        UCOLOG("[UCOnline2] No usable ogAppId: AppId spoof skipped "
+               "(DLC and ticket hooks are unaffected)");
 
     MH_Initialize();
 
@@ -1245,7 +1456,7 @@ void InstallSteamSpoofHooks()
     //   2:GetConnectedUniverse  3:GetServerRealTime  4:GetIPCountry
     //   5:GetImageSize  6:GetImageRGBA  7:GetCSERIPPort (private but
     //   present in vtable)  8:GetCurrentBatteryPower  9:GetAppID
-    if (g_ClientCtx.SteamUtils())
+    if (bSpoofAppId && g_ClientCtx.SteamUtils())
     {
         void** utilsVT = *reinterpret_cast<void***>(g_ClientCtx.SteamUtils());
         void* pGetAppIDFn = utilsVT[9];
@@ -1276,7 +1487,7 @@ void InstallSteamSpoofHooks()
     //   7:BIsDlcInstalled        8:GetEarliestPurchaseUnixTime
     //   9:BIsSubscribedFromFreeWeekend               10:GetDLCCount
     //  11:BGetDLCDataByIndex    12:InstallDLC        13:UninstallDLC
-    if (g_ClientCtx.SteamApps())
+    if ((bSpoofAppId || UcoDlcStore::Active()) && g_ClientCtx.SteamApps())
     {
         void** appsVT = *reinterpret_cast<void***>(g_ClientCtx.SteamApps());
 
@@ -1304,6 +1515,37 @@ void InstallSteamSpoofHooks()
         UCOLOG("[UCOnline2] ISteamApps DLC hooks: %d/%d installed (UnlockAll=%d, %d configured DLC)",
             installed, (int)(sizeof(hooks) / sizeof(hooks[0])),
             UcoDlcStore::UnlockAll() ? 1 : 0, UcoDlcStore::Count());
+    }
+
+    // ISteamUser vtable, declaration order from include/sdk/isteamuser.h.
+    // Safe to index because api_client.h pins SteamUser023.
+    //   13:GetAuthSessionTicket  14:GetAuthTicketForWebApi
+    //   15:BeginAuthSession      16:EndAuthSession      17:CancelAuthTicket
+    if (g_bEmulateAuthTicket && g_ClientCtx.SteamUser())
+    {
+        void** userVT = *reinterpret_cast<void***>(g_ClientCtx.SteamUser());
+
+        struct UserHook { int index; void* detour; void** original; const char* name; };
+        const UserHook uhooks[] = {
+            { 13, &Hooked_GetAuthSessionTicket, (void**)&g_pfnOrigGetAuthSessionTicket, "GetAuthSessionTicket" },
+            { 15, &Hooked_BeginAuthSession,     (void**)&g_pfnOrigBeginAuthSession,     "BeginAuthSession" },
+            { 16, &Hooked_EndAuthSession,       (void**)&g_pfnOrigEndAuthSession,       "EndAuthSession" },
+            { 17, &Hooked_CancelAuthTicket,     (void**)&g_pfnOrigCancelAuthTicket,     "CancelAuthTicket" },
+        };
+
+        int ok = 0;
+        for (const UserHook& h : uhooks)
+        {
+            void* target = userVT[h.index];
+            MH_STATUS st = MH_CreateHook(target, h.detour, h.original);
+            if (st == MH_OK && MH_EnableHook(target) == MH_OK)
+                ++ok;
+            else
+                UCOLOG("[UCOnline2] failed to hook ISteamUser::%s (vtable[%d]): %d",
+                    h.name, h.index, st);
+        }
+        UCOLOG("[UCOnline2] auth ticket emulation: %d/%d hooks installed",
+            ok, (int)(sizeof(uhooks) / sizeof(uhooks[0])));
     }
 }
 

@@ -10,6 +10,28 @@
 #pragma once
 
 #include <map>
+#include <vector>
+
+// A callback we generate ourselves rather than receive from Steam.
+//
+// The dispatcher normally only relays what real Steam hands it through
+// BGetCallback. That is a problem for anything we emulate: a game that calls
+// GetAuthSessionTicket registers GetAuthSessionTicketResponse_t and WAITS for
+// it, and real Steam will never send one for a ticket we invented. Same for
+// DlcInstalled_t after an emulated InstallDLC. Without this, emulating the call
+// is useless -- the game just sits there.
+//
+// Queued rather than dispatched inline because games do not expect a callback
+// to fire underneath the API call that requested it; the small delay mimics
+// Steam's own asynchrony and keeps re-entrancy out of the caller's stack frame.
+struct UcoPendingCallback
+{
+	int                  iCallback = 0;
+	std::vector<uint8_t> data;
+	HSteamUser           user = 0;
+	bool                 bServer = false;
+	ULONGLONG            dueTick = 0;   // GetTickCount64() before which it must not fire
+};
 
 typedef bool (S_CALLTYPE* Fn_BGetCallback)(HSteamPipe hPipe, CallbackMsg_t* pMsg);
 typedef void (S_CALLTYPE* Fn_FreeLastCallback)(HSteamPipe hPipe);
@@ -40,6 +62,7 @@ public:
 	std::multimap<int, CCallbackBase*> m_CallbackMap;
 	std::map<SteamAPICall_t, CCallbackBase*> m_CallResultMap;
 	std::map<SteamAPICall_t, BYTE*> m_BufferMap;
+	std::vector<UcoPendingCallback> m_Synthetic;   // guarded by m_MapLock
 
 	// Guards the three maps above.
 	//
@@ -65,6 +88,16 @@ public:
 	void DispatchFrameSafe(HSteamPipe hPipe, bool bServer);
 	void ExecuteCallResult(HSteamPipe hPipe, SteamAPICall_t hCall, CCallbackBase* pCb);
 	void Add(CCallbackBase* pCb, int iCallback);
+
+	// Queue a callback we synthesised. Safe to call from any thread; it is
+	// delivered from whichever thread next drives SteamAPI_RunCallbacks.
+	void PostCallback(int iCallback, const void* pvData, size_t cubData,
+	                  HSteamUser user, bool bServer = false, unsigned delayMs = 10);
+	// Deliver any queued callbacks that are due. Called at the top of dispatch.
+	void DrainSynthetic(bool bServer);
+	// Shared by real and synthetic delivery so both obey the same matching rules.
+	bool DispatchToTarget(int iCallback, void* pvData, uint32 cubData,
+	                      HSteamUser user, bool bServer);
 	void AddCallResult(CCallbackBase* pCb, SteamAPICall_t hCall);
 	void Remove(CCallbackBase* pCb);
 	void RemoveCallResult(CCallbackBase* pCb, SteamAPICall_t hCall);
