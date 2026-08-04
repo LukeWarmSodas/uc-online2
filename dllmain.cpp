@@ -1358,38 +1358,167 @@ static volatile LONG g_NextAuthTicket = 0;
 // emulation is on, and never call through. That is what makes it safe to hook
 // several ISteamUser objects (the game can hold more than one interface
 // version) without a trampoline per version.
+// ------------------------------------------------------------
+// Building a REAL Steam auth session ticket.
+//
+// The first attempt at this emitted 64 bytes of our own invention -- a magic
+// value, an AppId, a SteamID. That can only ever satisfy another copy of this
+// emulator, because it is not a Steam ticket and no real parser accepts it.
+// Anything that inspects the ticket (a game server, a publisher backend)
+// rejects it immediately, which is exactly what Farming Simulator 25 did.
+//
+// What actually works is emitting the genuine STRUCTURE. Servers that do not
+// call Valve to verify -- which is most of them -- parse the blob locally for
+// the SteamID, AppId and entitlements, and a structurally correct ticket
+// satisfies them. The 128-byte signature is left zeroed: we obviously cannot
+// forge Valve's, and anything that checks it is out of reach by definition.
+//
+// Layout below is the documented Steam app-ticket format (cross-checked against
+// gbe_fork's auth.cpp, which is the reference implementation):
+//
+//   GC blob        24 bytes   len(20), GCToken, SteamID, generated-date
+//   session blob   28 bytes   len(24), 1, 2, ExternalIP, InternalIP,
+//                             TimeSinceStartup, TicketGeneratedCount
+//   uint32                    remaining length (4 + ticket + signature)
+//   uint32                    ticket layout length (ticket blob + 4)
+//   ticket blob    42+ bytes  Version(4), SteamID, AppId, ExternalIP,
+//                             InternalIP, zero, generated, expires,
+//                             licenses[], DLCs[], padding
+//   signature     128 bytes   zeroed
+//
+// With no licences that totals 230 bytes; Steam itself returns 234, the
+// difference being a single licence entry, which is a useful size check.
+//
+// The DLC section is populated from the configured [DLC] list. Some games read
+// their entitlements from the ticket rather than from BIsDlcInstalled, so
+// answering only the API call can leave a game insisting it has no licence for
+// content it was just told it owns.
+// ------------------------------------------------------------
+namespace uco_ticket {
+
+struct Writer
+{
+    uint8_t* p;
+    uint8_t* end;
+    bool     ok;
+
+    Writer(void* buf, int cap)
+        : p((uint8_t*)buf), end((uint8_t*)buf + cap), ok(true) {}
+
+    void u16(uint16_t v) { put(&v, sizeof(v)); }
+    void u32(uint32_t v) { put(&v, sizeof(v)); }
+    void u64(uint64_t v) { put(&v, sizeof(v)); }
+    void zero(size_t n)  { if (!room(n)) return; memset(p, 0, n); p += n; }
+
+    size_t written(void* base) const { return (size_t)(p - (uint8_t*)base); }
+
+private:
+    bool room(size_t n) { if (p + n > end) { ok = false; return false; } return true; }
+    void put(const void* v, size_t n) { if (!room(n)) return; memcpy(p, v, n); p += n; }
+};
+
+static const uint32_t GC_LEN       = 20;
+static const uint32_t SESSION_LEN  = 24;
+static const uint32_t SIG_LEN      = 128;
+static const uint32_t TICKET_VER   = 4;
+
+} // namespace uco_ticket
+
+static uint32 UcoBuildSteamAuthTicket(void* pTicket, int cbMaxTicket,
+                                      uint32 appId, uint64 steamId)
+{
+    using namespace uco_ticket;
+
+    const uint32_t now = (uint32_t)time(nullptr);
+    const uint32_t startupSecs = (uint32_t)(GetTickCount64() / 1000ULL);
+    const uint32_t seq = (uint32_t)InterlockedIncrement(&g_NextAuthTicket);
+
+    // Size the ticket blob first: the two length prefixes have to describe it.
+    const int dlcCount = UcoDlcStore::Count();
+    size_t ticketBlob = 42;                       // fixed fields, incl. both counts + padding
+    ticketBlob += 4;                              // one licence entry
+    for (int i = 0; i < dlcCount; ++i)
+        ticketBlob += 4 + 2 + 4;                  // DLC AppId + licence count + one licence
+
+    const size_t total = 24 + 28 + 4 + 4 + ticketBlob + SIG_LEN;
+    if (cbMaxTicket < (int)total)
+        return 0;
+
+    Writer w(pTicket, cbMaxTicket);
+    memset(pTicket, 0, total);
+
+    // --- GC blob ---
+    w.u32(GC_LEN);
+    w.u64(((uint64_t)seq << 32) ^ (steamId + now));   // GCToken: unique per ticket
+    w.u64(steamId);
+    w.u32(now);
+
+    // --- session blob ---
+    w.u32(SESSION_LEN);
+    w.u32(1);
+    w.u32(2);
+    w.u32(0);                                     // ExternalIP (unknown/unused)
+    w.u32(0);                                     // InternalIP
+    w.u32(startupSecs);
+    w.u32(seq);
+
+    // --- length prefixes ---
+    w.u32((uint32_t)(4 + ticketBlob + SIG_LEN));  // remaining
+    w.u32((uint32_t)(ticketBlob + 4));            // ticket layout length
+
+    // --- ticket blob ---
+    w.u32(TICKET_VER);
+    w.u64(steamId);
+    w.u32(appId);
+    w.u32(0);                                     // ExternalIP
+    w.u32(0);                                     // InternalIP
+    w.u32(0);                                     // AlwaysZero / ownership flags
+    w.u32(now);                                   // generated
+    w.u32(now + 24 * 60 * 60);                    // expires
+
+    w.u16(1);                                     // licence count
+    w.u32(0);                                     // licence id (not validated locally)
+
+    w.u16((uint16_t)dlcCount);
+    for (int i = 0; i < dlcCount; ++i)
+    {
+        uint32_t dlcAppId = 0;
+        bool avail = false;
+        char name[8] = {};
+        UcoDlcStore::Get(i, &dlcAppId, &avail, name, 0);
+        w.u32(dlcAppId);
+        w.u16(1);                                 // one licence for this DLC
+        w.u32(0);
+    }
+
+    w.u16(0);                                     // padding
+    w.zero(SIG_LEN);                              // signature we cannot forge
+
+    if (!w.ok)
+        return 0;
+    return (uint32)total;
+}
+
 static HAuthTicket UcoEmitAuthTicket(void* pTicket, int cbMaxTicket, uint32* pcbTicket)
 {
-    if (!pTicket || cbMaxTicket < 64)
+    uint64 steamId = 0;
+    if (g_ClientCtx.SteamUser())
+        steamId = g_ClientCtx.SteamUser()->GetSteamID().ConvertToUint64();
+
+    const uint32 appId = g_OriginalAppId ? g_OriginalAppId : g_ForcedAppId;
+
+    const uint32 cb = pTicket ? UcoBuildSteamAuthTicket(pTicket, cbMaxTicket, appId, steamId) : 0;
+    if (!cb)
     {
         UCOLOG("[UCOnline2] GetAuthSessionTicket: buffer too small (%d) -- returning invalid handle",
             cbMaxTicket);
         if (pcbTicket) *pcbTicket = 0;
         return k_HAuthTicketInvalid;
     }
-
-    uint64 steamId = 0;
-    if (g_ClientCtx.SteamUser())
-        steamId = g_ClientCtx.SteamUser()->GetSteamID().ConvertToUint64();
-
-    const uint32 appId = g_OriginalAppId ? g_OriginalAppId : g_ForcedAppId;
-    uint8_t* p = (uint8_t*)pTicket;
-    memset(p, 0, (size_t)cbMaxTicket);
-
-    const uint32 magic = 0x554F4B54;                 /* 'UOKT' */
-    memcpy(p +  0, &magic,   sizeof(magic));
-    memcpy(p +  4, &appId,   sizeof(appId));
-    memcpy(p +  8, &steamId, sizeof(steamId));
-    const uint32 stamp = (uint32)time(nullptr);
-    memcpy(p + 16, &stamp,   sizeof(stamp));
-
-    const uint32 cb = 64;
     if (pcbTicket) *pcbTicket = cb;
 
-    const HAuthTicket handle = (HAuthTicket)InterlockedIncrement(&g_NextAuthTicket);
+    const HAuthTicket handle = (HAuthTicket)InterlockedCompareExchange(&g_NextAuthTicket, 0, 0);
 
-    // The game waits on this; without it the request looks like it never
-    // completed and the game retries forever.
     GetAuthSessionTicketResponse_t resp = {};
     resp.m_hAuthTicket = handle;
     resp.m_eResult     = k_EResultOK;
@@ -1397,8 +1526,8 @@ static HAuthTicket UcoEmitAuthTicket(void* pTicket, int cbMaxTicket, uint32* pcb
         GetDispatcher()->PostCallback(GetAuthSessionTicketResponse_t::k_iCallback,
             &resp, sizeof(resp), g_ClientUser, false, 10);
 
-    UCOLOG("[UCOnline2] GetAuthSessionTicket emulated -> handle=%u appid=%u size=%u",
-        handle, appId, cb);
+    UCOLOG("[UCOnline2] GetAuthSessionTicket emulated -> handle=%u appid=%u size=%u (%d DLC entitlement(s))",
+        handle, appId, cb, UcoDlcStore::Count());
     return handle;
 }
 
