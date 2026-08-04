@@ -372,8 +372,12 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 			SteamStub_Init();
 		}
 
-		std::vector<uint32> unlockedDLC = s_PluginLoader.GetUnlockDLCAppIds();
-		CSteamAppsStub::SetUnlockedDLCAppIds(unlockedDLC);
+		// DLC ownership: [DLC] UnlockAll + named entries, plus the legacy
+		// [Settings] UnlockDLC list. Loaded before any game code can ask.
+		UcoDlcStore::Load(s_PluginLoader.GetIniPath(), s_PluginLoader.GetOgAppId());
+		UCOLOG("[UCOnline2] DLC store: UnlockAll=%d, %d entr%s",
+			UcoDlcStore::UnlockAll() ? 1 : 0, UcoDlcStore::Count(),
+			UcoDlcStore::Count() == 1 ? "y" : "ies");
 
 		if (s_PluginLoader.GetEmulateTicketEnabled()) {
 			uint32 emulatedAppId = s_PluginLoader.GetOgAppId();
@@ -1105,11 +1109,22 @@ static DWORD WINAPI SteamStub_HookGetTickCount(void)
 
 typedef uint32 (S_CALLTYPE *Fn_GetAppID)(void* pThis);
 typedef bool   (S_CALLTYPE *Fn_BIsSubscribedApp)(void* pThis, AppId_t appID);
+typedef bool   (S_CALLTYPE *Fn_BIsDlcInstalled)(void* pThis, AppId_t appID);
+typedef uint32 (S_CALLTYPE *Fn_GetEarliestPurchase)(void* pThis, AppId_t appID);
+typedef int    (S_CALLTYPE *Fn_GetDLCCount)(void* pThis);
+typedef bool   (S_CALLTYPE *Fn_BGetDLCDataByIndex)(void* pThis, int iDLC, AppId_t* pAppID,
+                                                   bool* pbAvailable, char* pchName, int cchName);
 
-static Fn_GetAppID         g_pfnOriginalGetAppID         = nullptr;
-static Fn_BIsSubscribedApp g_pfnOriginalBIsSubscribedApp = nullptr;
+static Fn_GetAppID            g_pfnOriginalGetAppID           = nullptr;
+static Fn_BIsSubscribedApp    g_pfnOriginalBIsSubscribedApp   = nullptr;
+static Fn_BIsDlcInstalled     g_pfnOriginalBIsDlcInstalled    = nullptr;
+static Fn_GetEarliestPurchase g_pfnOriginalGetEarliestPurchase = nullptr;
+static Fn_GetDLCCount         g_pfnOriginalGetDLCCount        = nullptr;
+static Fn_BGetDLCDataByIndex  g_pfnOriginalBGetDLCDataByIndex = nullptr;
 static bool                g_bGetAppIDLoggedFirst        = false;
 static bool                g_bSubscribedLoggedFirst      = false;
+static bool                g_bDlcLoggedFirst             = false;
+static bool                g_bDlcCountLoggedFirst        = false;
 
 // Many games gate multiplayer behind "do you actually own this AppId?"
 // via ISteamApps::BIsSubscribedApp(GetAppID()). Real Steam answers
@@ -1118,7 +1133,11 @@ static bool                g_bSubscribedLoggedFirst      = false;
 static bool S_CALLTYPE Hooked_BIsSubscribedApp(void* pThis, AppId_t appID)
 {
     bool original = g_pfnOriginalBIsSubscribedApp(pThis, appID);
-    if (g_OriginalAppId != 0 && appID == g_OriginalAppId && !original)
+    if (original) return true;
+
+    // Real Steam answers for the SPOOFED AppId, so it says false both for the
+    // game itself and for any DLC. Defer to the store for both.
+    if (g_OriginalAppId != 0 && appID == g_OriginalAppId)
     {
         if (!g_bSubscribedLoggedFirst)
         {
@@ -1127,7 +1146,64 @@ static bool S_CALLTYPE Hooked_BIsSubscribedApp(void* pThis, AppId_t appID)
         }
         return true;
     }
-    return original;
+    return UcoDlcStore::IsOwned((uint32)appID);
+}
+
+// The DLC surface below is the reason unlocking used to be unreliable: only
+// BIsSubscribedApp was hooked, so a game asking "do I own <id>?" was answered,
+// while a game ENUMERATING its DLC through GetDLCCount/BGetDLCDataByIndex got
+// real Steam's answer for AppId 480 -- i.e. no DLC at all.
+static bool S_CALLTYPE Hooked_BIsDlcInstalled(void* pThis, AppId_t appID)
+{
+    if (g_pfnOriginalBIsDlcInstalled && g_pfnOriginalBIsDlcInstalled(pThis, appID))
+        return true;
+
+    const bool ours = UcoDlcStore::IsInstalled((uint32)appID);
+    if (ours && !g_bDlcLoggedFirst)
+    {
+        UCOLOG("[UCOnline2] BIsDlcInstalled(%u) hook returning true (Steam says false)", appID);
+        g_bDlcLoggedFirst = true;
+    }
+    return ours;
+}
+
+// Some games treat a purchase time of 0 as "not owned", so answering the
+// ownership question alone isn't enough. Backdated by four days.
+static uint32 S_CALLTYPE Hooked_GetEarliestPurchaseUnixTime(void* pThis, AppId_t appID)
+{
+    uint32 original = g_pfnOriginalGetEarliestPurchase
+                    ? g_pfnOriginalGetEarliestPurchase(pThis, appID) : 0;
+    if (original) return original;
+    if (!UcoDlcStore::IsOwned((uint32)appID)) return 0;
+    return (uint32)(time(nullptr) - 4 * 24 * 60 * 60);
+}
+
+// Enumeration. UnlockAll can answer any ownership question without knowing the
+// ids, but it cannot invent a LIST -- only DLC named in the ini can be reported
+// here, which is why [DLC] entries matter for games that build a DLC menu.
+static int S_CALLTYPE Hooked_GetDLCCount(void* pThis)
+{
+    const int original = g_pfnOriginalGetDLCCount ? g_pfnOriginalGetDLCCount(pThis) : 0;
+    const int ours = UcoDlcStore::Count();
+    if (ours <= 0) return original;
+
+    if (!g_bDlcCountLoggedFirst)
+    {
+        UCOLOG("[UCOnline2] GetDLCCount hook returning %d configured DLC (Steam reports %d)",
+            ours, original);
+        g_bDlcCountLoggedFirst = true;
+    }
+    return ours;
+}
+
+static bool S_CALLTYPE Hooked_BGetDLCDataByIndex(void* pThis, int iDLC, AppId_t* pAppID,
+                                                 bool* pbAvailable, char* pchName, int cchName)
+{
+    if (UcoDlcStore::Count() > 0)
+        return UcoDlcStore::Get(iDLC, (uint32_t*)pAppID, pbAvailable, pchName, cchName);
+    return g_pfnOriginalBGetDLCDataByIndex
+         ? g_pfnOriginalBGetDLCDataByIndex(pThis, iDLC, pAppID, pbAvailable, pchName, cchName)
+         : false;
 }
 
 // Make ISteamUtils::GetAppID() report ogAppId so the rest of the
@@ -1188,27 +1264,46 @@ void InstallSteamSpoofHooks()
         }
     }
 
-    // ISteamApps vtable: [6] = BIsSubscribedApp.
-    //   0:BIsSubscribed  1:BIsLowViolence  2:BIsCybercafe  3:BIsVACBanned
-    //   4:GetCurrentGameLanguage  5:GetAvailableGameLanguages
-    //   6:BIsSubscribedApp
+    // ISteamApps vtable, in declaration order from include/sdk/isteamapps.h.
+    // Hooking by index is safe here because WE pin the interface version:
+    // api_client.h requests STEAMAPPS_INTERFACE_VERSION008 explicitly, so the
+    // layout cannot shift under us. If that version string ever changes, these
+    // indices must be re-derived from the matching header.
+    //
+    //   0:BIsSubscribed          1:BIsLowViolence     2:BIsCybercafe
+    //   3:BIsVACBanned           4:GetCurrentGameLanguage
+    //   5:GetAvailableGameLanguages                   6:BIsSubscribedApp
+    //   7:BIsDlcInstalled        8:GetEarliestPurchaseUnixTime
+    //   9:BIsSubscribedFromFreeWeekend               10:GetDLCCount
+    //  11:BGetDLCDataByIndex    12:InstallDLC        13:UninstallDLC
     if (g_ClientCtx.SteamApps())
     {
         void** appsVT = *reinterpret_cast<void***>(g_ClientCtx.SteamApps());
-        void* pSubscribedFn = appsVT[6];
-        MH_STATUS s = MH_CreateHook(pSubscribedFn, &Hooked_BIsSubscribedApp,
-            reinterpret_cast<void**>(&g_pfnOriginalBIsSubscribedApp));
-        if (s == MH_OK)
+
+        struct DlcHook { int index; void* detour; void** original; const char* name; };
+        const DlcHook hooks[] = {
+            { 6,  &Hooked_BIsSubscribedApp,          (void**)&g_pfnOriginalBIsSubscribedApp,    "BIsSubscribedApp" },
+            { 7,  &Hooked_BIsDlcInstalled,           (void**)&g_pfnOriginalBIsDlcInstalled,     "BIsDlcInstalled" },
+            { 8,  &Hooked_GetEarliestPurchaseUnixTime,(void**)&g_pfnOriginalGetEarliestPurchase, "GetEarliestPurchaseUnixTime" },
+            { 10, &Hooked_GetDLCCount,               (void**)&g_pfnOriginalGetDLCCount,         "GetDLCCount" },
+            { 11, &Hooked_BGetDLCDataByIndex,        (void**)&g_pfnOriginalBGetDLCDataByIndex,  "BGetDLCDataByIndex" },
+        };
+
+        int installed = 0;
+        for (const DlcHook& h : hooks)
         {
-            if (MH_EnableHook(pSubscribedFn) == MH_OK)
-                UCOLOG("[UCOnline2] BIsSubscribedApp hook installed");
+            void* target = appsVT[h.index];
+            MH_STATUS s = MH_CreateHook(target, h.detour, h.original);
+            if (s == MH_OK && MH_EnableHook(target) == MH_OK)
+                ++installed;
             else
-                UCOLOG("[UCOnline2] MH_EnableHook failed for BIsSubscribedApp");
+                UCOLOG("[UCOnline2] failed to hook ISteamApps::%s (vtable[%d]): %d",
+                    h.name, h.index, s);
         }
-        else
-        {
-            UCOLOG("[UCOnline2] MH_CreateHook failed for BIsSubscribedApp: %d", s);
-        }
+
+        UCOLOG("[UCOnline2] ISteamApps DLC hooks: %d/%d installed (UnlockAll=%d, %d configured DLC)",
+            installed, (int)(sizeof(hooks) / sizeof(hooks[0])),
+            UcoDlcStore::UnlockAll() ? 1 : 0, UcoDlcStore::Count());
     }
 }
 

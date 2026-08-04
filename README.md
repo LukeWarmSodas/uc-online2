@@ -60,19 +60,51 @@ AppId=480
 ogAppId=220 # Half-life 2
 PluginsFolder=plugins
 GetStubbedLol=false
-UnlockDLC=123,456,789 # Comma-separated list of DLC AppIds to unlock
+UnlockDLC=123,456,789 # Legacy DLC list; prefer the [DLC] section below
 EmulateTicket=true  # Enable ticket emulation using ogAppId or AppId
 ```
 
 ## Unlock DLC
 
-The `UnlockDLC` setting allows you to unlock specific DLC by their AppIds. List the AppIds of the DLC you want to unlock, separated by commas. This works the same as `BIsSubscribedApp` and `BIsDlcInstalled` returning true for those specific AppIds, while still returning true for the base game and other DLC by default.
+Games ask about DLC in two different ways, and both have to be answered:
 
-Example:
+- **"Do I own AppId 211?"** — `BIsSubscribedApp` / `BIsDlcInstalled`
+- **"List my DLC"** — `GetDLCCount` + `BGetDLCDataByIndex`
+
+The second kind is why unlocking used to look unreliable: a game that checks ids it
+already knows worked, while a game that builds its DLC menu by *enumerating* saw
+nothing, because real Steam answers for the spoofed AppId and reports no DLC.
+
+Use the `[DLC]` section:
+
+```ini
+[DLC]
+UnlockAll=1              ; answer "owned" for any DLC id the game asks about
+
+; Named entries are what enumeration can report. Needed by games that build a
+; DLC list from the API rather than checking ids they already know.
+211=Half-Life 2: Deathmatch
+212=Half-Life 2: Lost Coast
+```
+
+`UnlockAll=1` handles every ownership *question* without you knowing any ids, but it
+cannot invent a *list* — only named entries appear in `GetDLCCount` /
+`BGetDLCDataByIndex`. So if DLC still doesn't show up in-game, add the entries
+explicitly; the ids are on SteamDB under the game's DLC tab.
+
+The old comma-separated form still works and is merged in (those entries enumerate
+as `DLC <id>`, since they carry no name):
+
 ```ini
 [Settings]
-AppId=480
-UnlockDLC=211,212,213,218  # Example DLC AppIds for Half-Life 2
+UnlockDLC=211,212,213,218
+```
+
+To check what was picked up, look in `%TEMP%/uc_online2.log` for:
+
+```
+[UCOnline2] DLC store: UnlockAll=1, 2 entries
+[UCOnline2] ISteamApps DLC hooks: 5/5 installed (UnlockAll=1, 2 configured DLC)
 ```
 
 ## Emulate Encrypted App Ticket

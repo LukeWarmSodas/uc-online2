@@ -50,6 +50,9 @@ public:
 			m_IniPath[0] = '\0';
 	}
 
+	// Path to union-crax.ini, or "" when it wasn't found next to the exe.
+	const char* GetIniPath() const { return m_IniPath; }
+
  	uint32 GetAppId()
  	{
  		if (m_IniPath[0] == '\0')

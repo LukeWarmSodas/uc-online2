@@ -11,6 +11,9 @@
 
 #include <Windows.h>
 #include <vector>
+#include <ctime>
+
+#include "include/dlc_store.h"
 
 #define STEAM_API_EXPORTS
 #include "include/sdk/steam_api.h"
@@ -323,30 +326,38 @@ extern CSteamAPIContext g_ClientCtx;
 class CSteamAppsStub : public ISteamApps
 {
 public:
-    static std::vector<uint32> s_UnlockedDLCAppIds;
-    static void SetUnlockedDLCAppIds(const std::vector<uint32>& appIds) { s_UnlockedDLCAppIds = appIds; }
+    // Ownership answers come from UcoDlcStore so the stub and the passthrough
+    // hooks in dllmain.cpp can never disagree. Kept as a shim for callers.
+    static void SetUnlockedDLCAppIds(const std::vector<uint32>& appIds)
+    {
+        for (uint32 id : appIds) UcoDlcStore::Add(id, nullptr);
+    }
     virtual bool BIsSubscribed() override { return true; }
     virtual bool BIsLowViolence() override { return true; }
     virtual bool BIsCybercafe() override { return false; }
     virtual bool BIsVACBanned() override { return false; }
     virtual const char *GetCurrentGameLanguage() override { return "english"; }
     virtual const char *GetAvailableGameLanguages() override { return "english"; }
+    // NOTE: these previously walked the id list and then returned true no matter
+    // what, so the configured list was dead code and EVERY id read as owned --
+    // including appId 0, which makes some games hang on the loading screen.
     virtual bool BIsSubscribedApp(AppId_t appID) override {
-        for (uint32 id : s_UnlockedDLCAppIds) {
-            if (id == (uint32)appID) return true;
-        }
-        return true;
+        return UcoDlcStore::IsOwned((uint32)appID);
     }
     virtual bool BIsDlcInstalled(AppId_t appID) override {
-        for (uint32 id : s_UnlockedDLCAppIds) {
-            if (id == (uint32)appID) return true;
-        }
-        return true;
+        return UcoDlcStore::IsInstalled((uint32)appID);
     }
-    virtual uint32 GetEarliestPurchaseUnixTime(AppId_t nAppID) override { return 0; }
+    // Games that check this treat 0 as "not owned", so owned DLC needs a real
+    // timestamp. Backdated, because a purchase time in the future is nonsense.
+    virtual uint32 GetEarliestPurchaseUnixTime(AppId_t nAppID) override {
+        if (!UcoDlcStore::IsOwned((uint32)nAppID)) return 0;
+        return (uint32)(time(nullptr) - 4 * 24 * 60 * 60);
+    }
     virtual bool BIsSubscribedFromFreeWeekend() override { return false; }
-    virtual int GetDLCCount() override { return 0; }
-    virtual bool BGetDLCDataByIndex(int iDLC, AppId_t *pAppID, bool *pbAvailable, char *pchName, int cchNameBufferSize) override { return false; }
+    virtual int GetDLCCount() override { return UcoDlcStore::Count(); }
+    virtual bool BGetDLCDataByIndex(int iDLC, AppId_t *pAppID, bool *pbAvailable, char *pchName, int cchNameBufferSize) override {
+        return UcoDlcStore::Get(iDLC, (uint32_t*)pAppID, pbAvailable, pchName, cchNameBufferSize);
+    }
     virtual void InstallDLC(AppId_t nAppID) override {}
     virtual void UninstallDLC(AppId_t nAppID) override {}
     virtual void RequestAppProofOfPurchaseKey(AppId_t nAppID) override {}
@@ -379,7 +390,6 @@ private:
     static CSteamAppsStub s_AppsStub;
 };
 
-std::vector<uint32> CSteamAppsStub::s_UnlockedDLCAppIds;
 bool CSteamUserStub::s_bEmulateTicket = false;
 uint32 CSteamUserStub::s_unEmulatedAppId = 0;
 std::vector<uint8_t> CSteamUserStub::s_EncryptedTicket;
