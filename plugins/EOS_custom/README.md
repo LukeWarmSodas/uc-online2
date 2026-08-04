@@ -47,7 +47,9 @@ Forever Skies and Palworld use EOS very differently on top of the same login —
 
 They also span different SDK builds (Forever Skies and old Palworld ship a byte-identical 1.15.5; Palworld 1.0 reports `EOS_Platform_Options` `ApiVersion=12`), and the same offsets resolved the game's real IDs in each.
 
-This is now confirmed against the headers rather than inferred: `EOS_Platform_Options` was diffed from **1.15.x through 1.19.1.2**, and every field the plugin touches is at the same offset in both — `ProductId` +16, `SandboxId` +24, `ClientCredentials` +32, `DeploymentId` +80. Everything added since (`Flags`, `CacheDirectory`, `TickBudgetInMilliseconds`, `RTCOptions`, `IntegratedPlatformOptionsContainerHandle`, `SystemSpecificOptions`, `TaskNetworkTimeoutSeconds`) was appended *after* `DeploymentId`. EOS appends, it does not reorder.
+The evidence for each end of that range is different, and worth stating precisely. **1.19.1.2 is header-verified**: `EOS_Platform_Options` was read straight out of the official SDK headers and every field the plugin touches is exactly where it expects — `ProductId` +16, `SandboxId` +24, `ClientCredentials` +32, `DeploymentId` +80. Everything added since (`Flags`, `CacheDirectory`, `TickBudgetInMilliseconds`, `RTCOptions`, `IntegratedPlatformOptionsContainerHandle`, `SystemSpecificOptions`, `TaskNetworkTimeoutSeconds`) was appended *after* `DeploymentId`. EOS appends, it does not reorder.
+
+**1.15.5 is verified empirically, not from headers** — Epic no longer distributes SDKs older than 1.17. The proof there is that Forever Skies and Palworld ship it and both work: the plugin reads their real IDs out at those offsets and co-op connects. Versions in between are untested but bracketed by the two ends.
 
 The quick runtime sanity check still applies to anything newer: if the `[EOSAuth]` log prints the game's original IDs as valid 32-hex strings, the layout matched.
 
@@ -133,6 +135,6 @@ Output: `plugins\EOS_custom\relbuild\x64\EOS_custom.dll`. Single-source; MinHook
 
 - **Your Epic app is doing the hosting.** Free-tier limits apply, and you can only play with people using your IDs — you won't see legitimate players (that's deliberate: it keeps you off the publisher's backend).
 - Anonymous Device ID identities are per-machine. Deleting the local device id means a new `ProductUserId`.
-- Struct offsets are verified against the official headers for **1.15.x → 1.19.1.2** (`ProductId` +16, `SandboxId` +24, `ClientCredentials` +32, `DeploymentId` +80). Structs the plugin *builds* are declared at the newest layout it knows and clamp their advertised `ApiVersion` to match, so the SDK is never told to read a field that isn't there.
+- Struct offsets are header-verified at **1.19.1.2** and empirically confirmed at **1.15.5** (via two shipping games; Epic no longer distributes SDKs below 1.17) (`ProductId` +16, `SandboxId` +24, `ClientCredentials` +32, `DeploymentId` +80). Structs the plugin *builds* are declared at the newest layout it knows and clamp their advertised `ApiVersion` to match, so the SDK is never told to read a field that isn't there.
 - If a game's own code *also* validates the platform identity (not just EOS), it may need extra handling.
 - The hooks install from `DllMain` because the EOS SDK usually loads before `UCO_PluginInit`; a fallback logger writes to `%TEMP%\uc_online2.log` until the host's logger is available.
