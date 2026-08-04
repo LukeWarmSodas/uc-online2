@@ -123,11 +123,18 @@ struct EOS_Connect_Credentials {
     int32_t     Type;
 };
 
-// EOS_Connect_UserLoginInfo (optional; used for DeviceID display name)
-//   int32 ApiVersion; const char* DisplayName; (+ later versions add more)
+// EOS_Connect_UserLoginInfo (optional; used for DeviceID display name).
+// Declared at API version 2 -- the layout as of SDK 1.19.1, which appended
+// NsaIdToken. We BUILD this struct rather than only reading it, so it must be
+// at least as large as the version we advertise in ApiVersion: the SDK reads
+// exactly the fields that version promises. Declaring v1 while echoing a game's
+// ApiVersion=2 would have the SDK read NsaIdToken past the end of the object
+// and dereference whatever followed.
+#define EOSC_USERLOGININFO_MAX_SUPPORTED 2
 struct EOS_Connect_UserLoginInfo {
     int32_t     ApiVersion;
     const char* DisplayName;
+    const char* NsaIdToken;      // v2+; always null for us (Nintendo only)
 };
 
 // EOS_Connect_LoginOptions
@@ -458,8 +465,12 @@ static void IssueDeviceIdLogin(const PendingLogin& p)
     g_DevCreds.Type       = EOS_ECT_DEVICEID_ACCESS_TOKEN;
 
     // Device ID login REQUIRES UserLoginInfo with a DisplayName.
-    g_DevLoginInf.ApiVersion  = g_UserInfoApiVersion;
+    // Never advertise a version newer than the layout declared above, even if
+    // the game asked for one -- the SDK would read fields we don't have.
+    g_DevLoginInf.ApiVersion  = (g_UserInfoApiVersion > EOSC_USERLOGININFO_MAX_SUPPORTED)
+                                ? EOSC_USERLOGININFO_MAX_SUPPORTED : g_UserInfoApiVersion;
     g_DevLoginInf.DisplayName = g_Cfg.DisplayName;
+    g_DevLoginInf.NsaIdToken  = nullptr;
 
     g_DevLoginOpts.ApiVersion    = g_LoginOptsApiVersion;
     g_DevLoginOpts.Credentials   = &g_DevCreds;

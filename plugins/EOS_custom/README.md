@@ -45,7 +45,11 @@ Device ID login requires a device id to already exist, so the plugin calls `EOS_
 
 Forever Skies and Palworld use EOS very differently on top of the same login — Redpoint Sessions vs. raw Lobbies — and both are fixed by the same two hooks, because the hooks are on the **EOS SDK itself**, not on any game code. Expect this to work for most EOS titles that log in with a platform (Steam) credential.
 
-They also span **two different SDK builds** (Forever Skies and old Palworld ship a byte-identical 1.15.5; Palworld 1.0 reports `EOS_Platform_Options` `ApiVersion=12`), and the same offsets resolved the game's real IDs in both — EOS appends fields rather than reordering them. Still worth a sanity check on a much newer SDK: if the `[EOSAuth]` log prints the game's original IDs as valid 32-hex strings, the layout matched.
+They also span different SDK builds (Forever Skies and old Palworld ship a byte-identical 1.15.5; Palworld 1.0 reports `EOS_Platform_Options` `ApiVersion=12`), and the same offsets resolved the game's real IDs in each.
+
+This is now confirmed against the headers rather than inferred: `EOS_Platform_Options` was diffed from **1.15.x through 1.19.1.2**, and every field the plugin touches is at the same offset in both — `ProductId` +16, `SandboxId` +24, `ClientCredentials` +32, `DeploymentId` +80. Everything added since (`Flags`, `CacheDirectory`, `TickBudgetInMilliseconds`, `RTCOptions`, `IntegratedPlatformOptionsContainerHandle`, `SystemSpecificOptions`, `TaskNetworkTimeoutSeconds`) was appended *after* `DeploymentId`. EOS appends, it does not reorder.
+
+The quick runtime sanity check still applies to anything newer: if the `[EOSAuth]` log prints the game's original IDs as valid 32-hex strings, the layout matched.
 
 ## Setup
 
@@ -129,6 +133,6 @@ Output: `plugins\EOS_custom\relbuild\x64\EOS_custom.dll`. Single-source; MinHook
 
 - **Your Epic app is doing the hosting.** Free-tier limits apply, and you can only play with people using your IDs — you won't see legitimate players (that's deliberate: it keeps you off the publisher's backend).
 - Anonymous Device ID identities are per-machine. Deleting the local device id means a new `ProductUserId`.
-- Struct offsets are pinned to the **EOS SDK 1.15.x** x64 ABI (`ProductId` +16, `SandboxId` +24, `ClientCredentials` +32, `DeploymentId` +80). A future SDK could reorder these; re-verify if a game ships something much newer.
+- Struct offsets are verified against the official headers for **1.15.x → 1.19.1.2** (`ProductId` +16, `SandboxId` +24, `ClientCredentials` +32, `DeploymentId` +80). Structs the plugin *builds* are declared at the newest layout it knows and clamp their advertised `ApiVersion` to match, so the SDK is never told to read a field that isn't there.
 - If a game's own code *also* validates the platform identity (not just EOS), it may need extra handling.
 - The hooks install from `DllMain` because the EOS SDK usually loads before `UCO_PluginInit`; a fallback logger writes to `%TEMP%\uc_online2.log` until the host's logger is available.
