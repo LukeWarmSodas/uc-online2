@@ -50,6 +50,10 @@ Two things that catch people out:
 ## Configuration
 
 Create `union-crax.ini` next to the game executable to change your AppId as needed. If this file is missing, AppId defaults to `480` and plugins are not loaded. `PluginsFolder` is relative to the game executable or wherever it's set in the .ini. Or should be. I haven't tested it yet. Check the `steam_appid.txt` file that gets created upon running the game to check if your set AppId was accepted. For games that have `480` patched in
+
+Set `WarnOverlayDisabled=true` to log a startup warning when Steam reports the
+overlay disabled for the process. This is passive; use a Steam shortcut with the
+overlay enabled if you need Shift+Tab or Steam invite UI.
 the game's code, try setting it to something else free that's multiplayer, like `440`
 (Team Fortress 2). Shapes of Dreams did not work using `480`, but worked fine with `440`.
 ((THANK YOU to deityofsukana for helping figure that out for certain!!!))
@@ -112,7 +116,7 @@ To check what was picked up, look in `%TEMP%/uc_online2.log` for:
 The `EmulateTicket` setting covers **both** kinds of Steam ticket a game may ask for:
 
 - **Encrypted app ticket** — `GetEncryptedAppTicket` / `RequestEncryptedAppTicket`, plus `UserHasLicenseForApp` ownership checks, answered for `ogAppId` (or `AppId` if unset).
-- **Auth session ticket** — `GetAuthSessionTicket`, which is what most games use to prove identity to a host. Previously this passed straight through to real Steam, which mints the ticket under the *spoofed* AppId, so the host rejected it. The tell in the log is the game registering callback `163` (`GetAuthSessionTicketResponse_t`) repeatedly: asking for a ticket, never getting a usable one, retrying.
+- **Auth session ticket** — `GetAuthSessionTicket`, plus the legacy `InitiateGameConnection` client/server handshake used by older Steam integrations. Previously these passed straight through to real Steam, which mints the ticket under the *spoofed* AppId, so the host rejected it. The tell in the log is the game registering callback `163` (`GetAuthSessionTicketResponse_t`) repeatedly: asking for a ticket, never getting a usable one, retrying.
 
 `BeginAuthSession` / `EndAuthSession` / `CancelAuthTicket` are emulated to match, and the response callbacks (`GetAuthSessionTicketResponse_t`, `ValidateAuthTicketResponse_t`) are delivered — a game that *waits* on those would otherwise hang even with a valid-looking ticket.
 
@@ -121,7 +125,7 @@ This works because the check is **peer-side**: both players run the emulator, so
 Look for this in `%TEMP%/uc_online2.log`:
 
 ```
-[UCOnline2] auth ticket emulation: 4/4 hooks installed
+[UCOnline2] auth ticket emulation: 6/6 hooks installed
 [UCOnline2] GetAuthSessionTicket emulated -> handle=1 appid=2300320 size=64
 [UCOnline2] BeginAuthSession emulated -> OK for 7656119... (64 byte ticket)
 ```
@@ -136,6 +140,39 @@ AppId=480
 ogAppId=440  # Used for ticket emulation (falls back to AppId if not set)
 EmulateTicket=true
 ```
+
+## What this cannot fix
+
+Some games are out of reach no matter what the emulator does, and it is worth
+knowing the shape of that before spending an evening on one.
+
+**Servers that verify a Steam app-ownership ticket.** The game asks Steam for an
+auth session ticket and sends it to the publisher, whose server checks Valve's
+**128-byte signature** on it. That signature cannot be produced without Valve's
+private key, so no amount of client-side work passes the check. `EmulateTicket`
+produces a structurally correct ticket, which is enough for a peer that runs this
+same emulator, and never enough for a server that validates properly.
+
+Confirmed on **Farming Simulator 25** by hooking `GetAuthSessionTicket` inside a
+competing fix and reading the bytes it produces: its ticket is a **genuine,
+Valve-signed ticket belonging to a different Steam account** — one that actually
+owns the game — generated on a server weeks earlier and replayed by every user of
+that fix. It works because the credential is real, not because the check is weak.
+
+How to recognise it early:
+
+- the game registers callback `163` (`GetAuthSessionTicketResponse_t`) and the
+  connection fails a second or two later — a round trip, not a local error
+- a structurally valid emulated ticket still gets rejected
+
+**Related walls**, all server-side and all unforgeable: a publisher backend that
+allow-lists its own application ID, an account service that mints its own session
+token from a platform ticket, and kernel-level anti-cheat. If ownership is proven
+to a machine you do not control, the answer is no.
+
+**What still works:** everything validated *peer-side*. Games where multiplayer is
+Steam lobbies plus P2P, or where the host itself validates the joining player, are
+the normal case and are what this project is for.
 
 ## Plugin Loader / Injector
 
