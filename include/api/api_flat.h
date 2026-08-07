@@ -796,12 +796,14 @@ S_API SteamAPICall_t S_CALLTYPE SteamAPI_ISteamUser_RequestEncryptedAppTicket(in
 {
 	if (g_bClientReady == false)
 		__debugbreak();
+	UCOLOG("[UCOnline2] FLAT -> SteamAPI_ISteamUser_RequestEncryptedAppTicket cbDataToInclude=%d", cbDataToInclude);
 	return g_ClientCtx.SteamUser()->RequestEncryptedAppTicket(pDataToInclude, cbDataToInclude);
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamUser_GetEncryptedAppTicket(intptr_t instancePtr, void * pTicket, int cbMaxTicket, uint32 * pcbTicket)
 {
 	if (g_bClientReady == false)
 		__debugbreak();
+	UCOLOG("[UCOnline2] FLAT -> SteamAPI_ISteamUser_GetEncryptedAppTicket cbMaxTicket=%d", cbMaxTicket);
 	return g_ClientCtx.SteamUser()->GetEncryptedAppTicket(pTicket, cbMaxTicket, pcbTicket);
 }
 S_API int S_CALLTYPE SteamAPI_ISteamUser_GetGameBadgeLevel(intptr_t instancePtr, int nSeries, bool bFoil)
@@ -2632,11 +2634,20 @@ S_API bool S_CALLTYPE SteamAPI_ISteamRemoteStorage_EndFileWriteBatch(intptr_t in
 		__debugbreak();
 	return g_ClientCtx.SteamRemoteStorage()->EndFileWriteBatch();
 }
-S_API SteamAPICall_t S_CALLTYPE SteamAPI_ISteamUserStats_RequestCurrentStats(intptr_t instancePtr)
+S_API bool S_CALLTYPE SteamAPI_ISteamUserStats_RequestCurrentStats(intptr_t instancePtr)
 {
-	// RequestCurrentStats was removed from SDK (managed by Steam client)
-	// Return invalid to let the caller handle gracefully
-	return k_uAPICallInvalid;
+	// Older Steamworks.NET builds gate startup on this bool. Newer Steam clients
+	// sync stats before launch, so there is no current vtable call to forward.
+	const uint32 appId = g_OriginalAppId ? g_OriginalAppId : g_ForcedAppId;
+	UserStatsReceived_t cb = {};
+	cb.m_nGameID = CGameID(appId).ToUint64();
+	cb.m_eResult = k_EResultOK;
+	if (g_bClientReady && g_ClientCtx.SteamUser())
+		cb.m_steamIDUser = g_ClientCtx.SteamUser()->GetSteamID();
+
+	GetDispatcher()->PostCallback(UserStatsReceived_t::k_iCallback, &cb, sizeof(cb), g_ClientUser, false, 10);
+	UCOLOG("[UCOnline2] SteamAPI_ISteamUserStats_RequestCurrentStats -> true; queued UserStatsReceived app=%u\r\n", appId);
+	return true;
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamUserStats_GetStatInt32(intptr_t instancePtr, const char * pchName, int32 * pData)
 {

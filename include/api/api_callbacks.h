@@ -113,6 +113,13 @@ S_API bool S_CALLTYPE SteamAPI_ManualDispatch_GetNextCallback(HSteamPipe hPipe, 
 				{
 					pDisp->m_bProcessing = true;
 
+					if (pDisp->TryGetSyntheticForManual(false, pMsg))
+					{
+						pDisp->m_ManualCbId = pMsg->m_iCallback;
+						pDisp->m_ManualCbSize = pMsg->m_cubParam;
+						return true;
+					}
+
 					if (pDisp->m_pfnBGetCallback(hPipe, pMsg))
 					{
 						pDisp->m_ManualCbId = pMsg->m_iCallback;
@@ -158,7 +165,8 @@ S_API void S_CALLTYPE SteamAPI_ManualDispatch_FreeLastCallback(HSteamPipe hPipe)
 		{
 			if (pDisp->m_bProcessing)
 			{
-				pDisp->m_pfnFreeLastCallback(hPipe);
+				if (!pDisp->FreeManualSynthetic())
+					pDisp->m_pfnFreeLastCallback(hPipe);
 				pDisp->m_ManualCbId = 0;
 				pDisp->m_ManualCbSize = 0;
 				pDisp->m_bProcessing = false;

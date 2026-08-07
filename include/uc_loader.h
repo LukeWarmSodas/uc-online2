@@ -193,6 +193,14 @@ uint32 GetOgAppId()
 		return IniReadBool("VerboseLog", false);
 	}
 
+	bool GetWarnOverlayDisabled()
+	{
+		if (m_IniPath[0] == '\0')
+			return false;
+
+		return IniReadBool("WarnOverlayDisabled", false);
+	}
+
 	// This does not need to be set!! It will automatically run as true!!
 	bool GetForceOwnership()
 	{

@@ -58,6 +58,8 @@ public:
 	HSteamUser m_CurrentUser;
 	int m_ManualCbId;
 	int m_ManualCbSize;
+	std::vector<uint8_t> m_ManualSyntheticData;
+	bool m_bManualSyntheticActive;
 	bool m_bProcessing;
 	std::multimap<int, CCallbackBase*> m_CallbackMap;
 	std::map<SteamAPICall_t, CCallbackBase*> m_CallResultMap;
@@ -93,6 +95,8 @@ public:
 	// delivered from whichever thread next drives SteamAPI_RunCallbacks.
 	void PostCallback(int iCallback, const void* pvData, size_t cubData,
 	                  HSteamUser user, bool bServer = false, unsigned delayMs = 10);
+	bool TryGetSyntheticForManual(bool bServer, CallbackMsg_t* pMsg);
+	bool FreeManualSynthetic();
 	// Deliver any queued callbacks that are due. Called at the top of dispatch.
 	void DrainSynthetic(bool bServer);
 	// Shared by real and synthetic delivery so both obey the same matching rules.

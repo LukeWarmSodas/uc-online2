@@ -21,6 +21,9 @@
 #include "include/sdk/steam_gameserver.h"
 #include "include/sdk/isteamapplist.h"
 
+// forward-declare logging so it can be used in class methods declared below
+void UCOLOG(const char* fmt, ...);
+
 const uint32 k_unServerFlagNone    = 0x00;
 const uint32 k_unServerFlagSecure  = 0x01;
 const uint32 k_unServerFlagPrivate = 0x02;
@@ -106,13 +109,35 @@ public:
     }
     virtual bool BIsBehindNAT() override { return false; }
     virtual void AdvertiseGame(CSteamID, uint32, uint16) override {}
-    virtual SteamAPICall_t RequestEncryptedAppTicket(void* pDataToInclude, int cbDataToInclude) override {
-        s_EncryptedTicket.clear();
-        s_EncryptedTicket.resize(128);
-        uint32 ticketSize = (uint32)GenerateFakeTicket(s_EncryptedTicket.data(), (uint32)s_EncryptedTicket.size(), pDataToInclude, cbDataToInclude);
-        s_EncryptedTicket.resize(ticketSize);
-        return k_uAPICallInvalid;
-    }
+	virtual SteamAPICall_t RequestEncryptedAppTicket(void* pDataToInclude, int cbDataToInclude) override {
+		s_EncryptedTicket.clear();
+		s_EncryptedTicket.resize(512); // start with a reasonable buffer
+		uint32 ticketSize = (uint32)GenerateFakeTicket(s_EncryptedTicket.data(), (uint32)s_EncryptedTicket.size(), pDataToInclude, cbDataToInclude);
+		if (ticketSize == 0) {
+			UCOLOG("[UCOnline2] RequestEncryptedAppTicket -> GenerateFakeTicket failed (cbDataToInclude=%d)", cbDataToInclude);
+			s_EncryptedTicket.clear();
+			return k_uAPICallInvalid;
+		}
+		if (ticketSize > s_EncryptedTicket.size()) {
+			UCOLOG("[UCOnline2] RequestEncryptedAppTicket -> GenerateFakeTicket returned size larger than buffer: %u > %zu", ticketSize, s_EncryptedTicket.size());
+			s_EncryptedTicket.clear();
+			return k_uAPICallInvalid;
+		}
+		s_EncryptedTicket.resize(ticketSize);
+		UCOLOG("[UCOnline2] RequestEncryptedAppTicket -> generated encrypted app ticket size=%u (cbDataToInclude=%d)", ticketSize, cbDataToInclude);
+		// Hex-dump first bytes for debugging
+		{
+			const uint32_t show = ticketSize > 128 ? 128u : ticketSize;
+			char hexbuf[1024]; int pos = 0;
+			for (uint32_t i = 0; i < show && pos < (int)sizeof(hexbuf) - 4; ++i) {
+				pos += _snprintf_s(hexbuf + pos, sizeof(hexbuf) - pos, _TRUNCATE, "%02X", s_EncryptedTicket[i]);
+				if (i + 1 < show) pos += _snprintf_s(hexbuf + pos, sizeof(hexbuf) - pos, _TRUNCATE, " ");
+			}
+			hexbuf[pos] = 0;
+			UCOLOG("[UCOnline2] EncryptedAppTicket[0..%u]: %s", show, hexbuf);
+		}
+		return k_uAPICallInvalid;
+	}
     virtual bool GetEncryptedAppTicket(void* pTicket, int cbMaxTicket, uint32* pcbTicket) override {
         if (!pcbTicket) return false;
         *pcbTicket = (uint32)s_EncryptedTicket.size();
@@ -403,29 +428,102 @@ CSteamUserStub s_UserStub;
 
 inline uint32 CSteamUserStub::GenerateFakeTicket(uint8_t* pTicket, uint32 cbMaxTicket, void* pDataToInclude, int cbDataToInclude)
 {
-    if (cbMaxTicket < 64) return 0;
-    
-    memset(pTicket, 0, cbMaxTicket);
-    
-    pTicket[0] = 'S';
-    pTicket[1] = 'T';
-    pTicket[2] = 'E';
-    pTicket[3] = 'A';
-    pTicket[4] = 'M';
-    
-    *reinterpret_cast<uint32_t*>(pTicket + 4) = s_unEmulatedAppId;
-    
-    *reinterpret_cast<uint32_t*>(pTicket + 8) = GetTickCount();
-    
-    uint32 dataOffset = 16;
-    if (pDataToInclude && cbDataToInclude > 0 && dataOffset + cbDataToInclude < cbMaxTicket) {
-        memcpy(pTicket + dataOffset, pDataToInclude, cbDataToInclude);
-        dataOffset += cbDataToInclude;
-    }
-    
-    *reinterpret_cast<uint32_t*>(pTicket + 12) = dataOffset;
-    
-    return dataOffset;
+	// Build a structurally-correct Steam auth/app ticket so games that parse
+	// the blob locally accept it. Signature is zeroed (we cannot forge it).
+	if (cbMaxTicket < 230) return 0; // minimum reasonable size
+
+	// local builder
+	struct Writer
+	{
+		uint8_t* p;
+		uint8_t* end;
+		bool ok;
+		Writer(void* buf, int cap) : p((uint8_t*)buf), end((uint8_t*)buf + cap), ok(true) {}
+		void u16(uint16_t v) { put(&v, sizeof(v)); }
+		void u32(uint32_t v) { put(&v, sizeof(v)); }
+		void u64(uint64_t v) { put(&v, sizeof(v)); }
+		void zero(size_t n)  { if (!room(n)) return; memset(p, 0, n); p += n; }
+		size_t written(void* base) const { return (size_t)(p - (uint8_t*)base); }
+	private:
+		bool room(size_t n) { if (p + n > end) { ok = false; return false; } return true; }
+		void put(const void* v, size_t n) { if (!room(n)) return; memcpy(p, v, n); p += n; }
+	} w(pTicket, cbMaxTicket);
+
+	const uint32_t GC_LEN      = 20;
+	const uint32_t SESSION_LEN = 24;
+	const uint32_t SIG_LEN     = 128;
+	const uint32_t TICKET_VER  = 4;
+
+	const uint32_t now = (uint32_t)time(nullptr);
+	const uint32_t startupSecs = (uint32_t)(GetTickCount64() / 1000ULL);
+	static volatile LONG s_localSeq = 0;
+	const uint32_t seq = (uint32_t)InterlockedIncrement(&s_localSeq);
+
+	uint64_t steamId = 0;
+	if (g_ClientCtx.SteamUser())
+		steamId = g_ClientCtx.SteamUser()->GetSteamID().ConvertToUint64();
+
+	// compute ticket blob size: base + one licence entry + DLC entries
+	const int dlcCount = UcoDlcStore::Count();
+	size_t ticketBlob = 42; // fixed fields
+	ticketBlob += 4; // one licence entry
+	for (int i = 0; i < dlcCount; ++i)
+		ticketBlob += 4 + 2 + 4; // DLC AppId + licence count + one licence
+
+	const size_t total = 24 + 28 + 4 + 4 + ticketBlob + SIG_LEN;
+	if (cbMaxTicket < (int)total) return 0;
+
+	memset(pTicket, 0, total);
+
+	// --- GC blob ---
+	w.u32(GC_LEN);
+	w.u64(((uint64_t)seq << 32) ^ (steamId + now));
+	w.u64(steamId);
+	w.u32(now);
+
+	// --- session blob ---
+	w.u32(SESSION_LEN);
+	w.u32(1);
+	w.u32(2);
+	w.u32(0); // ExternalIP
+	w.u32(0); // InternalIP
+	w.u32(startupSecs);
+	w.u32(seq);
+
+	// --- length prefixes ---
+	w.u32((uint32_t)(4 + ticketBlob + SIG_LEN));
+	w.u32((uint32_t)(ticketBlob + 4));
+
+	// --- ticket blob ---
+	w.u32(TICKET_VER);
+	w.u64(steamId); // steamid
+	w.u32(s_unEmulatedAppId);
+	w.u32(0); // ExternalIP
+	w.u32(0); // InternalIP
+	w.u32(0); // AlwaysZero / ownership flags
+	w.u32(now); // generated
+	w.u32(now + 24 * 60 * 60); // expires
+
+	w.u16(1); // licence count
+	w.u32(0); // licence id
+
+	w.u16((uint16_t)dlcCount);
+	for (int i = 0; i < dlcCount; ++i)
+	{
+		uint32_t dlcAppId = 0;
+		bool avail = false;
+		char name[8] = {};
+		UcoDlcStore::Get(i, &dlcAppId, &avail, name, 0);
+		w.u32(dlcAppId);
+		w.u16(1);
+		w.u32(0);
+	}
+
+	w.u16(0); // padding
+	w.zero(SIG_LEN);
+
+	if (!w.ok) return 0;
+	return (uint32)total;
 }
 
 class CSteamGameServerAPIContext
