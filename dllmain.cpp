@@ -178,8 +178,109 @@ void UCOLOG(const char* fmt, ...)
 void UCOColor(WORD color, const char* text)
 {
 	(void)color;
-	if (text && text[0])
-		UCOLOG("%s", text);
+    if (text && text[0])
+        UCOLOG("%s", text);
+}
+
+// Low-level steamclient exports used by older Steam integrations.  FS25's
+// working shim imports these directly, so the ISteamUser vtable hooks above
+// cannot observe the host-side game-server handshake.  These hooks are
+// deliberately pass-through: they provide visibility into the call path while
+// preserving the real Steam client's return values and validation behavior.
+using Fn_SteamGetGSHandle = void* (S_CALLTYPE*)(HSteamUser, HSteamPipe);
+using Fn_SteamGSSendSteam3UserConnect = bool (S_CALLTYPE*)(void*, uint64, uint32, const void*, uint32);
+using Fn_SteamInitiateGameConnection = int (S_CALLTYPE*)(HSteamUser, HSteamPipe, void*, int, uint64, int, uint32, uint16, bool);
+
+static Fn_SteamGetGSHandle g_OriginalSteamGetGSHandle = nullptr;
+static Fn_SteamGSSendSteam3UserConnect g_OriginalSteamGSSendSteam3UserConnect = nullptr;
+static Fn_SteamInitiateGameConnection g_OriginalSteamInitiateGameConnection = nullptr;
+
+static void* S_CALLTYPE Hooked_SteamGetGSHandle(HSteamUser hUser, HSteamPipe hPipe)
+{
+    void* handle = g_OriginalSteamGetGSHandle
+        ? g_OriginalSteamGetGSHandle(hUser, hPipe)
+        : nullptr;
+    UCOLOG("[UCOnline2] steamclient Steam_GetGSHandle user=%u pipe=%u -> %p",
+        (uint32)hUser, (uint32)hPipe, handle);
+    return handle;
+}
+
+static bool S_CALLTYPE Hooked_SteamGSSendSteam3UserConnect(void* pGSHandle,
+                                                            uint64 steamId,
+                                                            uint32 ipPublic,
+                                                            const void* pCookie,
+                                                            uint32 cbCookie)
+{
+    const bool result = g_OriginalSteamGSSendSteam3UserConnect
+        ? g_OriginalSteamGSSendSteam3UserConnect(pGSHandle, steamId, ipPublic, pCookie, cbCookie)
+        : false;
+    UCOLOG("[UCOnline2] steamclient Steam_GSSendSteam3UserConnect gs=%p steamid=%llu cookie=%u -> %s",
+        pGSHandle, (unsigned long long)steamId, cbCookie, result ? "true" : "false");
+    return result;
+}
+
+static int S_CALLTYPE Hooked_SteamInitiateGameConnection(HSteamUser hUser,
+                                                          HSteamPipe hPipe,
+                                                          void* pBlob,
+                                                          int cbMaxBlob,
+                                                          uint64 steamId,
+                                                          int gameAppId,
+                                                          uint32 ipServer,
+                                                          uint16 portServer,
+                                                          bool secure)
+{
+    const int result = g_OriginalSteamInitiateGameConnection
+        ? g_OriginalSteamInitiateGameConnection(hUser, hPipe, pBlob, cbMaxBlob, steamId,
+                                                 gameAppId, ipServer, portServer, secure)
+        : 0;
+    UCOLOG("[UCOnline2] steamclient Steam_InitiateGameConnection user=%u pipe=%u appid=%d server=%u:%u secure=%d -> %d bytes",
+        (uint32)hUser, (uint32)hPipe, gameAppId, ipServer, (uint32)portServer,
+        secure ? 1 : 0, result);
+    return result;
+}
+
+static void UcoInstallSteamClientAuthHooks(HMODULE hSteamClient)
+{
+    if (!hSteamClient)
+        return;
+
+    static HMODULE s_hookedModule = nullptr;
+    if (s_hookedModule == hSteamClient)
+        return;
+
+    MH_Initialize();
+
+    struct Item { const char* name; void* detour; void** original; };
+    Item items[] = {
+        { "Steam_GetGSHandle", (void*)&Hooked_SteamGetGSHandle, (void**)&g_OriginalSteamGetGSHandle },
+        { "Steam_GSSendSteam3UserConnect", (void*)&Hooked_SteamGSSendSteam3UserConnect, (void**)&g_OriginalSteamGSSendSteam3UserConnect },
+        { "Steam_InitiateGameConnection", (void*)&Hooked_SteamInitiateGameConnection, (void**)&g_OriginalSteamInitiateGameConnection },
+    };
+
+    int installed = 0;
+    for (const Item& item : items)
+    {
+        void* target = (void*)GetProcAddress(hSteamClient, item.name);
+        if (!target)
+        {
+            UCOLOG("[UCOnline2] steamclient export missing: %s", item.name);
+            continue;
+        }
+
+        MH_STATUS st = MH_CreateHook(target, item.detour, item.original);
+        if (st == MH_ERROR_ALREADY_CREATED)
+            st = MH_EnableHook(target);
+        else if (st == MH_OK)
+            st = MH_EnableHook(target);
+
+        if (st == MH_OK)
+            ++installed;
+        else
+            UCOLOG("[UCOnline2] steamclient hook failed: %s status=%d", item.name, st);
+    }
+
+    s_hookedModule = hSteamClient;
+    UCOLOG("[UCOnline2] steamclient auth tracing: %d/3 hooks installed", installed);
 }
 
 // ============================================================
@@ -249,6 +350,7 @@ void* InitSteamClient(HMODULE* phMod, bool bLocal, const char* iface)
 
 	if (g_pfnCreateInterface)
 	{
+		UcoInstallSteamClientAuthHooks(*phMod);
 		g_pSteamClientSafe = (ISteamClient*)g_pfnCreateInterface("SteamClient023", nullptr);
 		g_pfnReleaseThreadLocal = (Fn_ReleaseThreadLocal)GetProcAddress(*phMod, "Steam_ReleaseThreadLocalMemory");
 		g_CtxCounter++;
@@ -270,6 +372,17 @@ void* InitSteamClient(HMODULE* phMod, bool bLocal, const char* iface)
 // LoadGameOverlay
 // ============================================================
 
+// Small helper so the overlay log line reads clearly when something is unset.
+static const char* GetEnvOrDash(const char* name)
+{
+	static char bufs[4][MAX_PATH];
+	static int  turn = 0;
+	char* b = bufs[turn++ & 3];
+	const DWORD n = GetEnvironmentVariableA(name, b, MAX_PATH);
+	if (n == 0 || n >= MAX_PATH) { b[0] = '-'; b[1] = '\0'; }
+	return b;
+}
+
 static void LoadGameOverlay()
 {
 #if defined(_WIN32)
@@ -290,10 +403,47 @@ static void LoadGameOverlay()
 			#elif defined(_M_AMD64)
 				_snprintf_s(overlayPath, MAX_PATH, _TRUNCATE, "%s\\GameOverlayRenderer64.dll", installPath);
 			#endif
+			// Ensure steamclient is loaded first so the overlay has its dependencies
+			// satisfied and can hook into the process properly.
+			char steamClientPath[MAX_PATH] = { 0 };
+			#if defined(_M_IX86)
+				_snprintf_s(steamClientPath, MAX_PATH, _TRUNCATE, "%s\\steamclient.dll", installPath);
+			#elif defined(_M_AMD64)
+				_snprintf_s(steamClientPath, MAX_PATH, _TRUNCATE, "%s\\steamclient64.dll", installPath);
+			#endif
+			HMODULE hSteam = nullptr;
+			// Try to get an existing handle first
+			#if defined(_M_IX86)
+				hSteam = GetModuleHandleW(L"steamclient.dll");
+			#elif defined(_M_AMD64)
+				hSteam = GetModuleHandleW(L"steamclient64.dll");
+			#endif
+			if (!hSteam)
+			{
+				hSteam = LoadLibraryExA(steamClientPath, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+				if (hSteam)
+				{
+					#ifdef _DEBUG
+					UCOLOG("[UCOnline2] Preloaded steamclient for overlay: %s", steamClientPath);
+					#endif
+				}
+				else
+				{
+					#ifdef _DEBUG
+					UCOLOG("[UCOnline2] Failed to preload steamclient: %s (error %lu)", steamClientPath, GetLastError());
+					#endif
+				}
+			}
+
 			HMODULE hLoaded = LoadLibraryExA(overlayPath, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 			if (hLoaded)
 			{
+				// Not debug-only: when the overlay misbehaves this line, and
+				// what follows it, is the whole diagnosis.
 				UCOLOG("[UCOnline2] Loaded game overlay: %s", overlayPath);
+				UCOLOG("[UCOnline2]   env: SteamGameId=%s SteamClientLaunch=%s SteamPath=%s user=%s",
+					GetEnvOrDash("SteamGameId"), GetEnvOrDash("SteamClientLaunch"),
+					GetEnvOrDash("SteamPath"), GetEnvOrDash("SteamAppUser"));
 			}
 			else
 			{
@@ -465,6 +615,8 @@ CCallbackDispatcher::CCallbackDispatcher()
 	m_CurrentUser = 0;
 	m_ManualCbId = 0;
 	m_ManualCbSize = 0;
+	m_ManualSyntheticData.clear();
+	m_bManualSyntheticActive = false;
 	m_bProcessing = false;
 	m_CallbackMap.clear();
 	m_CallResultMap.clear();
@@ -483,6 +635,8 @@ CCallbackDispatcher::~CCallbackDispatcher()
 	m_CurrentUser = 0;
 	m_ManualCbId = 0;
 	m_ManualCbSize = 0;
+	m_ManualSyntheticData.clear();
+	m_bManualSyntheticActive = false;
 	m_bProcessing = false;
 	{
 		CDispatcherLock lock(&m_MapLock);
@@ -504,6 +658,8 @@ void CCallbackDispatcher::Shutdown()
 	m_CurrentUser = 0;
 	m_ManualCbId = 0;
 	m_ManualCbSize = 0;
+	m_ManualSyntheticData.clear();
+	m_bManualSyntheticActive = false;
 	m_bProcessing = false;
 	{
 		CDispatcherLock lock(&m_MapLock);
@@ -587,6 +743,54 @@ void CCallbackDispatcher::PostCallback(int iCallback, const void* pvData, size_t
 	m_Synthetic.push_back(pending);
 	UCOLOG("[UCOnline2] queued synthetic callback -> %d size=%zu delay=%ums",
 		iCallback, cubData, delayMs);
+}
+
+bool CCallbackDispatcher::TryGetSyntheticForManual(bool bServer, CallbackMsg_t* pMsg)
+{
+	if (!pMsg)
+		return false;
+
+	CDispatcherLock lock(&m_MapLock);
+	if (m_bManualSyntheticActive || m_Synthetic.empty())
+		return false;
+
+	const ULONGLONG now = GetTickCount64();
+	for (size_t i = 0; i < m_Synthetic.size(); ++i)
+	{
+		UcoPendingCallback& pending = m_Synthetic[i];
+		if (pending.bServer != bServer || now < pending.dueTick)
+			continue;
+
+		UcoPendingCallback fire = pending;
+		m_Synthetic.erase(m_Synthetic.begin() + (ptrdiff_t)i);
+
+		m_ManualSyntheticData = fire.data;
+		if (!m_ManualSyntheticData.empty())
+			RunCallbackPatchers(fire.iCallback, m_ManualSyntheticData.data(), (uint32)m_ManualSyntheticData.size());
+
+		pMsg->m_hSteamUser = fire.user;
+		pMsg->m_iCallback = fire.iCallback;
+		pMsg->m_pubParam = m_ManualSyntheticData.empty() ? nullptr : m_ManualSyntheticData.data();
+		pMsg->m_cubParam = (int)m_ManualSyntheticData.size();
+
+		m_bManualSyntheticActive = true;
+		UCOLOG("[UCOnline2] manual synthetic callback -> %d size=%d",
+			pMsg->m_iCallback, pMsg->m_cubParam);
+		return true;
+	}
+
+	return false;
+}
+
+bool CCallbackDispatcher::FreeManualSynthetic()
+{
+	CDispatcherLock lock(&m_MapLock);
+	if (!m_bManualSyntheticActive)
+		return false;
+
+	m_ManualSyntheticData.clear();
+	m_bManualSyntheticActive = false;
+	return true;
 }
 
 // Find the one registered callback that should receive this id and run it.
@@ -1549,6 +1753,47 @@ static HAuthTicket S_CALLTYPE Hooked_GetAuthSessionTicket4(void* pThis, void* pT
     return UcoEmitAuthTicket(pTicket, cbMaxTicket, pcbTicket);
 }
 
+// Legacy client/server authentication uses this older entry point instead of
+// GetAuthSessionTicket.  Its payload is still handed to the game server as an
+// opaque auth blob, so use the same locally parseable ticket structure.  The
+// endpoint arguments are retained in the signature for ABI compatibility.
+static int S_CALLTYPE Hooked_InitiateGameConnection(void* pThis, void* pAuthBlob,
+                                                    int cbMaxAuthBlob, CSteamID steamIDGameServer,
+                                                    uint32 unIPServer, uint16 usPortServer,
+                                                    bool bSecure)
+{
+    (void)pThis;
+    (void)steamIDGameServer;
+    (void)unIPServer;
+    (void)usPortServer;
+    (void)bSecure;
+
+    uint64 steamId = 0;
+    if (g_ClientCtx.SteamUser())
+        steamId = g_ClientCtx.SteamUser()->GetSteamID().ConvertToUint64();
+
+    const uint32 appId = g_OriginalAppId ? g_OriginalAppId : g_ForcedAppId;
+    const uint32 cb = pAuthBlob
+        ? UcoBuildSteamAuthTicket(pAuthBlob, cbMaxAuthBlob, appId, steamId)
+        : 0;
+    if (!cb)
+    {
+        UCOLOG("[UCOnline2] InitiateGameConnection emulated -> buffer too small (%d)",
+            cbMaxAuthBlob);
+        return 0;
+    }
+
+    UCOLOG("[UCOnline2] InitiateGameConnection emulated -> %u bytes appid=%u", cb, appId);
+    return (int)cb;
+}
+
+static void S_CALLTYPE Hooked_TerminateGameConnection(void* pThis,
+                                                       uint32 unIPServer, uint16 usPortServer)
+{
+    (void)pThis;
+    UCOLOG("[UCOnline2] TerminateGameConnection emulated for %u:%u", unIPServer, usPortServer);
+}
+
 static EBeginAuthSessionResult S_CALLTYPE Hooked_BeginAuthSession(void* pThis, const void* pAuthTicket,
                                                                   int cbAuthTicket, CSteamID steamID)
 {
@@ -1592,10 +1837,10 @@ static void S_CALLTYPE Hooked_CancelAuthTicket(void* pThis, HAuthTicket hAuthTic
 // Worse, the layout MOVES between versions, so hooking the game's object with
 // our version's indices would detour the wrong functions entirely:
 //
-//   version  GetAuthSessionTicket   Begin  End  Cancel
-//   021      13  (three args)       14     15   16
-//   022      13  (four args)        14     15   16
-//   023      13  (four args)        15     16   17
+//   version  Initiate  Terminate  GetAuthSessionTicket   Begin  End  Cancel
+//   021      3         4          13 (three args)        14     15   16
+//   022      3         4          13 (four args)         14     15   16
+//   023      3         4          13 (four args)         15     16   17
 //
 // 023 inserted GetAuthTicketForWebApi at 14 and pushed the rest down; 021
 // predates the networking-identity argument. Using 023 indices on a 021 object
@@ -1606,6 +1851,8 @@ static void S_CALLTYPE Hooked_CancelAuthTicket(void* pThis, HAuthTicket hAuthTic
 // ------------------------------------------------------------
 struct UcoUserAuthLayout
 {
+    int initiate;
+    int terminate;
     int  getTicket;
     int  begin;
     int  end;
@@ -1618,9 +1865,9 @@ static bool UcoUserAuthLayoutFor(const char* ver, UcoUserAuthLayout& out)
     if (!ver || _strnicmp(ver, "SteamUser", 9) != 0)
         return false;
     const int n = atoi(ver + 9);
-    if (n == 21) { out.getTicket = 13; out.begin = 14; out.end = 15; out.cancel = 16; out.ticketTakesIdentity = false; return true; }
-    if (n == 22) { out.getTicket = 13; out.begin = 14; out.end = 15; out.cancel = 16; out.ticketTakesIdentity = true;  return true; }
-    if (n >= 23) { out.getTicket = 13; out.begin = 15; out.end = 16; out.cancel = 17; out.ticketTakesIdentity = true;  return true; }
+    if (n == 21) { out.initiate = 3; out.terminate = 4; out.getTicket = 13; out.begin = 14; out.end = 15; out.cancel = 16; out.ticketTakesIdentity = false; return true; }
+    if (n == 22) { out.initiate = 3; out.terminate = 4; out.getTicket = 13; out.begin = 14; out.end = 15; out.cancel = 16; out.ticketTakesIdentity = true;  return true; }
+    if (n >= 23) { out.initiate = 3; out.terminate = 4; out.getTicket = 13; out.begin = 15; out.end = 16; out.cancel = 17; out.ticketTakesIdentity = true;  return true; }
     return false;   // 020 and older: layouts not verified, so do not touch them
 }
 
@@ -1656,6 +1903,8 @@ void UcoInstallUserAuthHooks(void* pIface, const char* ver)
 
     struct Item { int index; void* detour; const char* name; };
     const Item items[] = {
+        { L.initiate, (void*)&Hooked_InitiateGameConnection, "InitiateGameConnection" },
+        { L.terminate, (void*)&Hooked_TerminateGameConnection, "TerminateGameConnection" },
         { L.getTicket, getTicketDetour,             "GetAuthSessionTicket" },
         { L.begin,     (void*)&Hooked_BeginAuthSession, "BeginAuthSession" },
         { L.end,       (void*)&Hooked_EndAuthSession,   "EndAuthSession" },
@@ -1680,7 +1929,7 @@ void UcoInstallUserAuthHooks(void* pIface, const char* ver)
                 ver, it.name, it.index, st);
     }
 
-    UCOLOG("[UCOnline2] auth ticket emulation: %d/4 hooks installed on %s%s",
+    UCOLOG("[UCOnline2] auth ticket emulation: %d/6 hooks installed on %s%s",
         ok, ver, L.ticketTakesIdentity ? "" : " (3-arg ticket variant)");
 }
 

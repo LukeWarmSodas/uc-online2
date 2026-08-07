@@ -39,8 +39,52 @@ extern uint32 g_ForcedAppId;
 extern uint32 g_OriginalAppId;
 static bool s_bAnonUser = false;
 
+// Read a REG_SZ from HKCU\Software\Valve\Steam.
+static bool ReadSteamRegString(const char* name, char* out, DWORD cch)
+{
+	if (!out || cch == 0) return false;
+	out[0] = '\0';
+	HKEY hKey = nullptr;
+	if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Valve\\Steam", 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+		return false;
+	DWORD type = 0, cb = cch;
+	const LONG r = RegQueryValueExA(hKey, name, nullptr, &type, (LPBYTE)out, &cb);
+	RegCloseKey(hKey);
+	if (r != ERROR_SUCCESS || type != REG_SZ) { out[0] = '\0'; return false; }
+	out[(cb < cch) ? cb : cch - 1] = '\0';
+	return out[0] != '\0';
+}
+
+// The Steam overlay is not something we render -- it is Valve's own
+// GameOverlayRenderer(64).dll, and it configures itself entirely from the
+// environment the Steam client normally sets up before launching a game. Set
+// only SteamAppId/SteamGameId/SteamOverlayGameId and it loads, hooks nothing
+// useful, and Shift+Tab does nothing: it has no idea which Steam user it
+// belongs to, where Steam lives, or that it was "launched by Steam" at all.
+//
+// So mirror the full set Steam itself exports. All of it must be in place
+// BEFORE GameOverlayRenderer is loaded (see LoadGameOverlay, called straight
+// after this in DllMain) -- the overlay reads them once, on attach.
+// True when the process was started BY Steam (a real Steam launch, or a
+// Non-Steam Game shortcut). Detected before we set anything, because the
+// detection IS the environment we are about to overwrite.
+//
+// This matters more than any other overlay signal: Steam only arms the overlay
+// for a process it launched and is tracking as the running game. Loading
+// GameOverlayRenderer ourselves puts the renderer in the process, but Steam
+// never starts gameoverlayui and never authorises the session, so Shift+Tab has
+// nothing to open. No amount of environment faking changes that -- the decision
+// is made on Steam's side.
+bool g_bLaunchedBySteam = false;
+
 static void SetAppIDEnv()
 {
+	{
+		char probe[64] = { 0 };
+		const DWORD had = GetEnvironmentVariableA("SteamGameId", probe, sizeof(probe));
+		g_bLaunchedBySteam = (had > 0 && had < sizeof(probe));
+	}
+
 	char szApp[16] = { 0 };
 	char szGame[32] = { 0 };
 	char szOverlayGame[32] = { 0 };
@@ -48,12 +92,42 @@ static void SetAppIDEnv()
 	_snprintf_s(szApp, sizeof(szApp), _TRUNCATE, "%u", g_ForcedAppId);
 	_snprintf_s(szGame, sizeof(szGame), _TRUNCATE, "%llu", CGameID(g_ForcedAppId).ToUint64());
 
-	uint32 overlayAppId = (g_OriginalAppId != 0) ? g_OriginalAppId : g_ForcedAppId;
+	// Deliberately the FORCED id, not ogAppId: the overlay talks to the real
+	// Steam client, which only knows about a game the user actually owns. Point
+	// it at the real AppId and Steam has no matching licence or running-game
+	// record, and the overlay stays inert.
+	uint32 overlayAppId = g_ForcedAppId;
 	_snprintf_s(szOverlayGame, sizeof(szOverlayGame), _TRUNCATE, "%llu", CGameID(overlayAppId).ToUint64());
 
 	SetEnvironmentVariableA("SteamAppId", szApp);
 	SetEnvironmentVariableA("SteamGameId", szGame);
 	SetEnvironmentVariableA("SteamOverlayGameId", szOverlayGame);
+
+	// Tells the overlay this process was started by Steam. Without it the
+	// overlay treats itself as injected into a foreign process and does not
+	// arm its input hook -- which is precisely the "Shift+Tab does nothing"
+	// symptom.
+	SetEnvironmentVariableA("SteamClientLaunch", "1");
+	SetEnvironmentVariableA("SteamTenfoot", "0");
+
+	char steamPath[MAX_PATH] = { 0 };
+	if (ReadSteamRegString("SteamPath", steamPath, sizeof(steamPath)))
+	{
+		// The registry stores it with forward slashes; the overlay builds paths
+		// from this and wants the Windows form.
+		for (char* c = steamPath; *c; ++c) if (*c == '/') *c = '\\';
+		SetEnvironmentVariableA("SteamPath", steamPath);
+	}
+
+	// The overlay resolves the logged-in account to render the friends list and
+	// the invite UI. With no user it has nothing to show, which is why invites
+	// come up blank rather than not at all.
+	char steamUser[128] = { 0 };
+	if (ReadSteamRegString("AutoLoginUser", steamUser, sizeof(steamUser)))
+	{
+		SetEnvironmentVariableA("SteamAppUser", steamUser);
+		SetEnvironmentVariableA("SteamUser", steamUser);
+	}
 }
 
 static void WriteAppIDFile()
@@ -254,6 +328,33 @@ S_API ESteamAPIInitResult S_CALLTYPE SteamInternal_SteamAPI_Init(const char* psz
 				UCOColor(FOREGROUND_RED | FOREGROUND_INTENSITY, "[UCOnline2] Steam reported AppID 0, forcing 480\r\n");
 
 			SetAppIDEnv();
+			{
+				#if defined(_M_IX86)
+					const bool bModule = GetModuleHandleW(L"GameOverlayRenderer.dll") != nullptr;
+				#else
+					const bool bModule = GetModuleHandleW(L"GameOverlayRenderer64.dll") != nullptr;
+				#endif
+				// NOT a verdict: IsOverlayEnabled is documented to return false
+				// while the overlay is still attaching, and we are microseconds
+				// into startup here. Treating this as "disabled" produced a
+				// confidently wrong diagnosis. The launch check below is the
+				// signal that actually determines the outcome.
+				UCOLOG("[UCOnline2] Overlay: renderer module %s, launched-by-Steam=%d "
+					"(IsOverlayEnabled=%d, may still be attaching)",
+					bModule ? "loaded" : "NOT loaded", g_bLaunchedBySteam ? 1 : 0,
+					pUtils->IsOverlayEnabled() ? 1 : 0);
+
+				if (!g_bLaunchedBySteam && s_PluginLoader.GetWarnOverlayDisabled())
+				{
+					UCOColor(FOREGROUND_RED | FOREGROUND_INTENSITY,
+						"[UCOnline2] The Steam overlay will NOT work: this process was not "
+						"launched by Steam.\r\n"
+						"[UCOnline2]   Steam only arms the overlay for a game it started "
+						"itself. Add the game to Steam (Games > Add a Non-Steam Game), then "
+						"launch it from your library -- the emulator works exactly the same "
+						"either way.\r\n");
+				}
+			}
 			SteamAPI_SetBreakpadAppID(g_ForcedAppId);
 			Steam_RegisterInterfaceFuncs(g_ClientModule);
 			LoadBreakpadSymbols(g_ClientModule);
