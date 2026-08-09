@@ -8716,6 +8716,34 @@ S_API ISteamClient* S_CALLTYPE SteamAPI_SteamClient_v019()
 	return g_bClientReady ? g_ClientCtx.SteamClient() : nullptr;
 }
 
+// Facepunch.Steamworks resolves a versioned accessor per interface and throws
+// EntryPointNotFoundException from SteamClient.Init if one is absent -- which
+// surfaces as a HANG, not an error: Init throws, the client is never
+// constructed, and the game's preloader waits forever for an account that will
+// never exist. Vampire Survivors died exactly this way on SteamAPI_SteamUGC_v017.
+//
+// Returning our cached SteamClient023 for a v020 request is the same
+// substitution CreateInterface already makes: ISteamClient has only ever had
+// methods appended, so the older vtable is a prefix of the newer one.
+S_API ISteamClient* S_CALLTYPE SteamAPI_SteamClient_v020()
+{
+	UCOLOG("[UCOnline2] SteamAPI_SteamClient_v020\r\n");
+	return g_bClientReady ? g_ClientCtx.SteamClient() : nullptr;
+}
+
+// ISteamUGC is NOT append-only across versions, so handing back our pinned
+// v021 object would give the caller a vtable whose indices do not line up.
+// Ask real Steam for the v017 interface instead and pass that through -- then
+// the layout is whatever the caller was compiled against.
+S_API ISteamUGC* S_CALLTYPE SteamAPI_SteamUGC_v017()
+{
+	UCOLOG("[UCOnline2] SteamAPI_SteamUGC_v017\r\n");
+	if (!g_bClientReady)
+		return nullptr;
+	return (ISteamUGC*)SteamInternal_FindOrCreateUserInterface(
+		g_ClientUser, "STEAMUGC_INTERFACE_VERSION017");
+}
+
 // ============================================================
 // ISteamAppList flat API exports
 // ============================================================
