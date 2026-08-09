@@ -89,6 +89,15 @@ jobs:
             Copy-Item "patch.bat" "$packageRootrel/patch.bat" -Force
           }
 
+          # coherence schema pipeline. Needs the Unity editor, so it is a
+          # separate opt-in tool rather than something patch.bat can run --
+          # shipped because pointing a coherence game at your own project is
+          # otherwise a manual editor dance.
+          if (Test-Path "tools/coherence_schema") {
+            New-Item -ItemType Directory -Path "$packageRootrel/tools/coherence_schema" -Force | Out-Null
+            Copy-Item "tools/coherence_schema/*" "$packageRootrel/tools/coherence_schema/" -Recurse -Force
+          }
+
           if (Test-Path $archivePathrel) {
             Remove-Item $archivePathrel -Force
           }

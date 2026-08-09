@@ -49,8 +49,22 @@ if not defined EMU_DLL (
   echo.
 )
 
+rem ---- key-only mode ----
+rem
+rem   patch.bat "C:\path\to\game" /keyonly
+rem
+rem Repoints an ALREADY-PATCHED coherence game at a different project and
+rem changes nothing else -- no DLL, no plugins, no ini rewrite. Switching
+rem between your own project and a shared one should not mean redoing, and
+rem possibly disturbing, a working install.
+set "KEYONLY="
+if /i "%~2"=="/keyonly" set "KEYONLY=1"
+if /i "%~1"=="/keyonly" set "KEYONLY=1"
+if /i "%~2"=="-keyonly" set "KEYONLY=1"
+
 rem ---- resolve game folder (arg or prompt) ----
 set "GAME=%~1"
+if /i "%GAME%"=="/keyonly" set "GAME=%~2"
 if not defined GAME set /p "GAME=Drag the game folder here (or paste its path): "
 set "GAME=%GAME:"=%"
 if not defined GAME echo [ERROR] No folder given.& goto :end
@@ -225,6 +239,16 @@ if not defined FLAVOR if not defined HAS_EOS if not defined HAS_PLAYFAB if not d
 )
 echo.
 
+if defined KEYONLY (
+  if not defined HAS_COHERENCE (
+    echo [ERROR] /keyonly only applies to coherence games, and this is not one.
+    goto :end
+  )
+  echo Key-only mode: the runtime key will be replaced and NOTHING else.
+  echo.
+  goto :ask_coherence
+)
+
 rem ============================================================
 rem  Gather config
 rem
@@ -293,11 +317,17 @@ echo schema, enable ONE region, and paste the project's RUNTIME KEY below.
 echo Full instructions: plugins\coherence_universal\README.md
 echo.
 set /p "COH_KEY=  coherence runtime key (press Enter to skip): "
+echo.
+echo   NOTE: your project also needs the game's schema uploaded to it, which
+echo   requires the Unity editor. tools\coherence_schema automates that, or
+echo   the plugin README lists a shared project usable with no Unity at all.
+echo   Without a matching schema the game fails with SchemaNotFound.
 
 rem ============================================================
 rem  Write union-crax.ini  (sequential appends -- robust)
 rem ============================================================
 :write_ini
+if defined KEYONLY goto :deploy_plugins
 set "INI=%INI_DIR%\union-crax.ini"
 > "%INI%" echo [Settings]
 >> "%INI%" echo AppId=480
@@ -350,6 +380,7 @@ echo [OK] Wrote %INI%
 rem ============================================================
 rem  Install the emulator, backing up whatever is there
 rem ============================================================
+if defined KEYONLY goto :deploy_plugins
 if not defined EMU_DLL goto :deploy_plugins
 if not exist "%STEAM_DIR%" mkdir "%STEAM_DIR%" 2>nul
 
@@ -376,6 +407,7 @@ rem  Deploy plugins
 rem ============================================================
 :deploy_plugins
 set "NEEDDIR="
+if defined KEYONLY goto :skip_other_deploys
 if defined FLAVOR set "NEEDDIR=1"
 if defined HAS_COHERENCE set "NEEDDIR=1"
 if defined HAS_EOS set "NEEDDIR=1"
@@ -398,11 +430,15 @@ if defined HAS_EOS (
     echo        app at dev.epicgames.com, fill in [EOS], and re-run this script.
   )
 )
+:skip_other_deploys
+if defined KEYONLY goto :coherence_deploy
 if defined HAS_PLAYFAB (
   call :deploy playfab_universal
 )
+
+:coherence_deploy
 if defined HAS_COHERENCE (
-  call :deploy coherence_universal
+  if not defined KEYONLY call :deploy coherence_universal
   if defined COH_KEY call :patch_runtime_key
 )
 
@@ -413,6 +449,11 @@ echo.
 echo ============================================================
 echo  DONE.
 echo.
+if defined KEYONLY (
+  echo  Key-only run: see the runtime-key result above. Nothing else in this
+  echo  install was touched.
+  goto :summary_end
+)
 if not defined FLAVOR if not defined HAS_EOS if not defined HAS_PLAYFAB (
   echo  No plugin needed. Launch the game and try multiplayer BARE --
   echo  pure Steam P2P titles work through passthrough with no plugin.
@@ -448,6 +489,7 @@ if defined HAS_COHERENCE (
   )
 )
 echo.
+:summary_end
 echo  Log: %%TEMP%%\uc_online2.log
 echo ============================================================
 goto :end
