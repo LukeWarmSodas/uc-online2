@@ -194,6 +194,14 @@ if "%ENGINE%"=="Unity" (
   findstr /m /c:"PhotonUnityNetworking" "%GAME_EXE%" >nul 2>&1 && set "FLAVOR=Realtime"
 )
 
+rem coherence: the SDK bakes a schema next to the game. That file is present
+rem in every coherence build regardless of engine version, which makes it a
+rem better marker than any symbol name.
+set "HAS_COHERENCE="
+for /r "%GAME%" %%F in (combined.schema) do (
+  if exist "%%~fF" set "HAS_COHERENCE=1"
+)
+
 rem File presence beats any string scan -- if the SDK ships, it is in use.
 rem Same `for /r` trap as above: without "if exist" these fire in every
 rem directory walked and every game on earth "uses EOS".
@@ -210,7 +218,8 @@ if defined FLAVOR (
 )
 if defined HAS_EOS     echo            EOS: yes ^(EOS_custom plugin^)
 if defined HAS_PLAYFAB echo            PlayFab: yes ^(playfab_universal plugin^)
-if not defined FLAVOR if not defined HAS_EOS if not defined HAS_PLAYFAB (
+if defined HAS_COHERENCE echo            coherence: yes ^(coherence_universal plugin^)
+if not defined FLAVOR if not defined HAS_EOS if not defined HAS_PLAYFAB if not defined HAS_COHERENCE (
   echo            No secondary backend found -- if multiplayer is pure Steam
   echo            P2P this needs no plugin at all. TEST IT BARE FIRST.
 )
@@ -268,9 +277,22 @@ set /p "EOS_CLIENT=  EOS ClientId: "
 set /p "EOS_SECRET=  EOS ClientSecret: "
 
 :ask_playfab
-if not defined HAS_PLAYFAB goto :write_ini
+if not defined HAS_PLAYFAB goto :ask_coherence
 echo.
 set /p "PF_TITLE=  PlayFab TitleId (press Enter to skip): "
+
+:ask_coherence
+if not defined HAS_COHERENCE goto :write_ini
+echo.
+echo This game uses coherence. Multiplayer authenticates against the publisher's
+echo coherence project, which will not accept an emulated Steam ticket -- so the
+echo game has to be pointed at a project you control.
+echo.
+echo Create one at coherence.io ^(the free tier is enough^), upload the game's
+echo schema, enable ONE region, and paste the project's RUNTIME KEY below.
+echo Full instructions: plugins\coherence_universal\README.md
+echo.
+set /p "COH_KEY=  coherence runtime key (press Enter to skip): "
 
 rem ============================================================
 rem  Write union-crax.ini  (sequential appends -- robust)
@@ -297,7 +319,7 @@ if /i "%FLAVOR%"=="Fusion" (
 )
 
 :ini_eos
-if not defined HAS_EOS goto :ini_playfab
+if not defined HAS_EOS goto :ini_coherence
 >> "%INI%" echo(
 >> "%INI%" echo [EOS]
 if defined EOS_PRODUCT (>> "%INI%" echo ProductId=%EOS_PRODUCT%) else (>> "%INI%" echo ProductId=)
@@ -306,6 +328,14 @@ if defined EOS_DEPLOY  (>> "%INI%" echo DeploymentId=%EOS_DEPLOY%) else (>> "%IN
 if defined EOS_CLIENT  (>> "%INI%" echo ClientId=%EOS_CLIENT%) else (>> "%INI%" echo ClientId=)
 if defined EOS_SECRET  (>> "%INI%" echo ClientSecret=%EOS_SECRET%) else (>> "%INI%" echo ClientSecret=)
 >> "%INI%" echo DisplayName=Player
+
+:ini_coherence
+if not defined HAS_COHERENCE goto :ini_playfab
+>> "%INI%" echo(
+>> "%INI%" echo [Coherence]
+>> "%INI%" echo ForceGuestLogin=true
+if defined COH_KEY (>> "%INI%" echo RuntimeKey=%COH_KEY%) else (>> "%INI%" echo RuntimeKey=)
+>> "%INI%" echo LocalMode=false
 
 :ini_playfab
 if not defined HAS_PLAYFAB goto :wrote_ini
@@ -347,6 +377,7 @@ rem ============================================================
 :deploy_plugins
 set "NEEDDIR="
 if defined FLAVOR set "NEEDDIR=1"
+if defined HAS_COHERENCE set "NEEDDIR=1"
 if defined HAS_EOS set "NEEDDIR=1"
 if defined HAS_PLAYFAB set "NEEDDIR=1"
 if defined NEEDDIR if not exist "%INI_DIR%\plugins\" mkdir "%INI_DIR%\plugins"
@@ -369,6 +400,10 @@ if defined HAS_EOS (
 )
 if defined HAS_PLAYFAB (
   call :deploy playfab_universal
+)
+if defined HAS_COHERENCE (
+  call :deploy coherence_universal
+  if defined COH_KEY call :patch_runtime_key
 )
 
 rem ============================================================
@@ -400,10 +435,82 @@ if defined HAS_EOS (
 if defined HAS_PLAYFAB (
   echo  PlayFab: set [PlayFab] TitleId if you skipped it.
 )
+if defined HAS_COHERENCE (
+  if defined COH_KEY (
+    echo  coherence: see the runtime-key result above. Upload the game's schema
+    echo    ^(StreamingAssets\combined.schema^) and enable ONE region -- with
+    echo    several enabled, host and joiner can land in different ones, which
+    echo    reads as "lobby doesn't exist or is full".
+  ) else (
+    echo  coherence: no runtime key given, so the game still points at the
+    echo    publisher's project and multiplayer will be refused. Re-run with a
+    echo    key, or set [Coherence] LocalMode=true to skip the cloud entirely.
+  )
+)
 echo.
 echo  Log: %%TEMP%%\uc_online2.log
 echo ============================================================
 goto :end
+
+rem ------------------------------------------------------------
+rem  :patch_runtime_key
+rem
+rem  Points the game at YOUR coherence project by replacing the publisher's
+rem  runtime key in the game data.
+rem
+rem  This CANNOT be done at runtime. coherence copies the key during its own
+rem  init, about a second before UCOnline2 loads plugins (plugins load at
+rem  SteamAPI_Init, after the engine has booted). Patching the settings field,
+rem  and even patching the string's characters in place, both lose that race.
+rem
+rem  Runtime keys are 32 hex characters, so this is a same-length replace and
+rem  no offset in the asset file moves. Batch cannot edit binary files, so the
+rem  work goes to a small PowerShell helper written to %TEMP%.
+rem ------------------------------------------------------------
+:patch_runtime_key
+set "COH_ASSETS="
+if defined DATA if exist "%DATA%\globalgamemanagers.assets" set "COH_ASSETS=%DATA%\globalgamemanagers.assets"
+if not defined COH_ASSETS (
+  echo [SKIP] globalgamemanagers.assets not found -- patch the runtime key by hand.
+  goto :eof
+)
+
+set "PS1=%TEMP%\uco2_cohkey.ps1"
+> "%PS1%" echo param([string]$File,[string]$NewKey)
+>>"%PS1%" echo $bytes = [IO.File]::ReadAllBytes($File)
+>>"%PS1%" echo $text  = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
+>>"%PS1%" echo # Locating the key is the whole risk here: a bare 32-hex search matches
+>>"%PS1%" echo # thousands of false positives, because binary data reads as hex-ish
+>>"%PS1%" echo # ASCII. Anchoring on the first 40-char hex is not enough either -- an
+>>"%PS1%" echo # unrelated one appears earlier in the file, and following it patched 32
+>>"%PS1%" echo # bytes of unrelated data during testing.
+>>"%PS1%" echo #
+>>"%PS1%" echo # The serialized coherence RuntimeSettings lays out schemaID (40 hex),
+>>"%PS1%" echo # then runtimeKey (32 hex), then localHost. So require ALL THREE in one
+>>"%PS1%" echo # window, and reject a candidate with almost no character variety --
+>>"%PS1%" echo # real keys are not runs of 0s and 1s.
+>>"%PS1%" echo $found = $false
+>>"%PS1%" echo foreach ($a in [regex]::Matches($text, '\b[0-9a-f]{40}\b')) {
+>>"%PS1%" echo   $win = $text.Substring($a.Index, [Math]::Min(400, $text.Length - $a.Index))
+>>"%PS1%" echo   if ($win -notmatch 'localhost') { continue }
+>>"%PS1%" echo   foreach ($c in [regex]::Matches($win, '\b[0-9a-f]{32}\b')) {
+>>"%PS1%" echo     if ((($c.Value.ToCharArray() ^| Sort-Object -Unique).Count) -lt 8) { continue }
+>>"%PS1%" echo     $old = $c.Value; $idx = $a.Index + $c.Index; $found = $true; break
+>>"%PS1%" echo   }
+>>"%PS1%" echo   if ($found) { break }
+>>"%PS1%" echo }
+>>"%PS1%" echo if (-not $found) { Write-Host '  [SKIP] could not locate the runtime key; patch by hand - see plugins\coherence_universal\README.md'; exit 1 }
+>>"%PS1%" echo if ($old -eq $NewKey) { Write-Host '  [OK] already points at your project'; exit 0 }
+>>"%PS1%" echo if ($old.Length -ne $NewKey.Length) { Write-Host '  [ERROR] key length differs, refusing'; exit 1 }
+>>"%PS1%" echo $bak = $File + '.uco2.bak'
+>>"%PS1%" echo if (-not (Test-Path $bak)) { Copy-Item $File $bak; Write-Host ('  [OK] backed up -^> ' + $bak) }
+>>"%PS1%" echo $newB = [Text.Encoding]::ASCII.GetBytes($NewKey)
+>>"%PS1%" echo [Array]::Copy($newB, 0, $bytes, $idx, $newB.Length)
+>>"%PS1%" echo [IO.File]::WriteAllBytes($File, $bytes)
+>>"%PS1%" echo Write-Host ('  [OK] runtime key ' + $old + ' -^> ' + $NewKey)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" "%COH_ASSETS%" "%COH_KEY%"
+del "%PS1%" >nul 2>&1
+goto :eof
 
 rem ------------------------------------------------------------
 rem  :deploy <plugin base name>
