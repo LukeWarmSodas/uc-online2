@@ -82,6 +82,31 @@ VampireSurvivors_Data/globalgamemanagers.assets
 Runtime keys are 32 hex characters, so it is a same-length byte replace — no
 offsets shift. Back up the file first.
 
+## Shared project (no setup)
+
+If you would rather not stand up your own project, a shared one is available for
+**Vampire Survivors** — the schema is already uploaded and all regions are
+enabled, so it works out of the box:
+
+```
+runtime key: fce1ea692a854b50b9f945ef6aa17758
+```
+
+Patch that into `VampireSurvivors_Data/globalgamemanagers.assets` in place of the
+32-character key already there (see below).
+
+**Availability is not guaranteed.** It runs on a free coherence tier, it is not
+monitored, and it may be rate-limited, rotated or taken down at any time without
+notice — if co-op stops working, assume that is why and set up your own project
+using the steps below. Everyone sharing it also shares its quota, and everyone on
+it can see everyone else's lobbies.
+
+Only the *runtime key* is published here. It is a client-side identifier that
+ships inside every coherence game by design, in the same way a Photon AppId
+does. A project's **portal/service tokens are a different thing entirely** and
+must never be put in a config, a README or a release — they grant management
+access to the project.
+
 ## Using your own coherence project
 
 1. Create a project; note its **runtime key**.
