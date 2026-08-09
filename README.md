@@ -2,7 +2,51 @@
 
 Custom modified Steam API .dll for Steam games to spoof your game as Spacewar. Drop-in replacement for `steam_api.dll` / `steam_api64.dll`.
 
-## Usage
+## Quick start — `patch.bat`
+
+**Drag your game folder onto `patch.bat`.** It works out what the game needs and
+does the whole setup, which for most games is everything you have to do.
+
+It will:
+
+- find the engine (Unity or Unreal) and the game's real executable
+- find where `steam_api64.dll` actually lives and install ours **there**, backing
+  up the original to `.bak` first
+- write `union-crax.ini` next to the **running exe** — for Unreal that is not the
+  game folder, and an ini in the wrong place is silently ignored
+- detect **Photon**, **EOS**, **PlayFab** and **coherence**, copy the matching
+  plugin, and prompt for whatever app IDs that backend needs
+
+Everything third-party stays yours: it never invents a Photon GUID, an Epic app
+or a coherence project. Press Enter at any prompt to skip it and a stub is
+written for you to fill in later.
+
+```
+patch.bat "C:\Games\SomeGame"            full setup
+patch.bat "C:\Games\SomeGame" /keyonly   coherence runtime key only, nothing else
+```
+
+`/keyonly` repoints an already-patched coherence game at a different project
+without touching the DLL, plugins or ini — for switching between your own
+project and a shared one. Running it twice is safe.
+
+**What it will not do:**
+
+- Install into a 32-bit game. It refuses rather than writing an x64 DLL where it
+  cannot load.
+- Deploy `EOS_custom` until you supply an Epic app — an inert plugin only adds a
+  variable while you are working out whether co-op runs over plain Steam.
+- Upload a coherence schema. That needs the Unity editor; see
+  [`tools/coherence_schema`](tools/coherence_schema/README.md).
+
+If it reports **no secondary backend**, try the game with no plugin at all —
+titles whose multiplayer is purely Steam lobbies and P2P work through
+passthrough unmodified.
+
+Steam still has to be running, at the same elevation as the game — see
+[Administrator / elevation](#administrator--elevation).
+
+## Usage (manual)
 
 __**If using downloaded .dlls from [Releases](https://github.com/LukeWarmSodas/uc-online2/releases):**__
 - 1. Extract the archive downloaded from __**LATEST**__ release (should be v1.8.0 as of currently writing this).
