@@ -8744,6 +8744,23 @@ S_API ISteamUGC* S_CALLTYPE SteamAPI_SteamUGC_v017()
 		g_ClientUser, "STEAMUGC_INTERFACE_VERSION017");
 }
 
+// The GAME SERVER half of the same interface, and it is a separate export.
+//
+// Adding only the client accessor above got Vampire Survivors booting and into
+// a lobby, and then it failed on this one the moment it activated P2P and
+// spun up its game-server context. A game that pins an interface version pins
+// it on BOTH sides -- so when adding a versioned accessor, always add the
+// SteamGameServer* twin at the same time rather than waiting for the second
+// half of the failure to show up.
+S_API ISteamUGC* S_CALLTYPE SteamAPI_SteamGameServerUGC_v017()
+{
+	UCOLOG("[UCOnline2] SteamAPI_SteamGameServerUGC_v017\r\n");
+	if (!g_bServerReady)
+		return nullptr;
+	return (ISteamUGC*)SteamInternal_FindOrCreateGameServerInterface(
+		g_ServerUser, "STEAMUGC_INTERFACE_VERSION017");
+}
+
 // ============================================================
 // ISteamAppList flat API exports
 // ============================================================
