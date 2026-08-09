@@ -53,10 +53,12 @@ rem ---- key-only mode ----
 rem
 rem   patch.bat "C:\path\to\game" /keyonly
 rem
-rem Repoints an ALREADY-PATCHED coherence game at a different project and
-rem changes nothing else -- no DLL, no plugins, no ini rewrite. Switching
-rem between your own project and a shared one should not mean redoing, and
-rem possibly disturbing, a working install.
+rem Changes the coherence project a game points at and nothing else -- no DLL,
+rem no plugins, no ini rewrite. Use it to switch between your own project and
+rem the shared one without redoing, and possibly disturbing, a working install.
+rem
+rem For a FRESH install do a normal full run instead and answer SHARED at the
+rem runtime-key prompt; key-only does not deploy the emulator or the plugin.
 set "KEYONLY="
 if /i "%~2"=="/keyonly" set "KEYONLY=1"
 if /i "%~1"=="/keyonly" set "KEYONLY=1"
@@ -316,7 +318,22 @@ echo Create one at coherence.io ^(the free tier is enough^), upload the game's
 echo schema, enable ONE region, and paste the project's RUNTIME KEY below.
 echo Full instructions: plugins\coherence_universal\README.md
 echo.
-set /p "COH_KEY=  coherence runtime key (press Enter to skip): "
+echo   Type SHARED to use the community project instead -- no coherence
+echo   account, no Unity, no schema upload. Availability is not guaranteed.
+echo.
+set /p "COH_KEY=  coherence runtime key, or SHARED (press Enter to skip): "
+
+rem The shared project's RUNTIME key. Safe to publish: a runtime key is a
+rem client-side identifier that ships inside every coherence game by design,
+rem like a Photon AppId. Portal/service tokens are a different thing entirely
+rem and must never appear here.
+if /i "%COH_KEY%"=="shared" (
+  set "COH_KEY=fce1ea692a854b50b9f945ef6aa17758"
+  echo.
+  echo   Using the shared project. It is a free tier, unmonitored, and shared
+  echo   with everyone else using it -- if co-op stops working, suspect this
+  echo   first and set up your own project.
+)
 echo.
 echo   NOTE: your project also needs the game's schema uploaded to it, which
 echo   requires the Unity editor. tools\coherence_schema automates that, or

@@ -26,9 +26,27 @@ patch.bat "C:\Games\SomeGame"            full setup
 patch.bat "C:\Games\SomeGame" /keyonly   coherence runtime key only, nothing else
 ```
 
-`/keyonly` repoints an already-patched coherence game at a different project
-without touching the DLL, plugins or ini — for switching between your own
-project and a shared one. Running it twice is safe.
+### coherence games: the easy route
+
+A coherence game has to point at a coherence project that has its schema
+uploaded. Setting that up yourself means an account, the Unity editor and a
+schema upload — so patch.bat offers a shortcut.
+
+**Answer `SHARED` at the runtime-key prompt.** That points the game at a
+community project which already has the schema uploaded and every region
+enabled: no account, no Unity, nothing else to do.
+
+It is a free tier, unmonitored, and shared with everyone else using it, so
+**availability is not guaranteed** — it may be rate-limited or rotated without
+notice, and everyone on it sees everyone else's lobbies. If co-op stops working,
+suspect that first and set up your own project with
+[`tools/coherence_schema`](tools/coherence_schema/README.md).
+
+`/keyonly` changes which project a game points at and nothing else — handy for
+switching between your own project and the shared one without disturbing a
+working install. It does **not** deploy the emulator or the plugin, so for a
+fresh install do a normal full run and answer `SHARED` there instead. Running it
+twice is safe; the second run reports the key already matches.
 
 **What it will not do:**
 
