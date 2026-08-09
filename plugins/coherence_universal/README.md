@@ -82,6 +82,54 @@ VampireSurvivors_Data/globalgamemanagers.assets
 Runtime keys are 32 hex characters, so it is a same-length byte replace — no
 offsets shift. Back up the file first.
 
+### Reproducing the patch
+
+**1. Find the game's current runtime key.** The easiest way is to let the plugin
+tell you: put *any* 32-character value in `[Coherence] RuntimeKey`, run the game
+once, and read `%TEMP%\uc_online2.log`:
+
+```
+[Coherence] RuntimeKey patched in place (was "1b82a78f1d0d48519d6be40c39af5162")
+```
+
+The value in brackets is the publisher's key. (The in-place patch itself does
+not survive — coherence has already copied the key by then — but it is a
+reliable way to *read* it.)
+
+**2. Find which file holds it.** For a Unity game it is normally
+`<Game>_Data/globalgamemanagers.assets`, but check rather than assume:
+
+```bash
+cd "<game>/<Game>_Data"
+grep -lc "1b82a78f1d0d48519d6be40c39af5162" *.assets globalgamemanagers 2>/dev/null
+```
+
+**3. Replace it.** Same length in, same length out — verify both before writing:
+
+```python
+import io, os, shutil
+
+f   = "globalgamemanagers.assets"
+old = b"1b82a78f1d0d48519d6be40c39af5162"   # the publisher's key
+new = b"fce1ea692a854b50b9f945ef6aa17758"   # yours, from the coherence dashboard
+assert len(old) == len(new), "lengths must match or every following offset shifts"
+
+data = io.open(f, "rb").read()
+assert data.count(old) == 1, "expected exactly one occurrence"
+
+if not os.path.exists(f + ".uco2.bak"):
+    shutil.copyfile(f, f + ".uco2.bak")
+
+io.open(f, "wb").write(data.replace(old, new))
+```
+
+The two asserts are the whole safety story: equal lengths means no offset in the
+asset file moves, and exactly one occurrence means you are not overwriting
+something that merely looks similar. Restore from `.uco2.bak` to undo.
+
+**Redo this after any game update** — a patched `globalgamemanagers.assets` is
+replaced wholesale when the game is updated.
+
 ## Shared project (no setup)
 
 If you would rather not stand up your own project, a shared one is available for
