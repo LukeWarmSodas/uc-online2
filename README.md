@@ -114,7 +114,8 @@ Two things that catch people out:
 Create `union-crax.ini` next to the game executable to change your AppId as needed. If this file is missing, AppId defaults to `480` and plugins are not loaded. `PluginsFolder` is relative to the game executable or wherever it's set in the .ini. Or should be. I haven't tested it yet. Check the `steam_appid.txt` file that gets created upon running the game to check if your set AppId was accepted. For games that have `480` patched in
 
 Set `WarnOverlayDisabled=true` to log a startup warning when the Steam overlay
-will not work. See [Steam overlay](#steam-overlay) below.
+looks like it will not work. Treat it as a hint, not a verdict: the overlay does
+work for directly-launched games, but a few titles never show it regardless.
 the game's code, try setting it to something else free that's multiplayer, like `440`
 (Team Fortress 2). Shapes of Dreams did not work using `480`, but worked fine with `440`.
 ((THANK YOU to deityofsukana for helping figure that out for certain!!!))
@@ -201,52 +202,6 @@ AppId=480
 ogAppId=440  # Used for ticket emulation (falls back to AppId if not set)
 EmulateTicket=true
 ```
-
-## Steam overlay
-
-**To get Shift+Tab and the Steam invite UI, add the game to Steam and launch it
-from there** — Games > *Add a Non-Steam Game* > pick the game's `.exe`, then run
-it from your library. Confirmed working (Plague Inc: Evolved).
-
-The emulator behaves identically either way; it does not care who started the
-process. But the overlay does.
-
-### Why launching directly cannot work
-
-The overlay is Valve's own `GameOverlayRenderer(64).dll`. UCOnline2 loads it into
-the process and sets the environment it expects — but **Steam only arms the
-overlay for a process it launched itself**. Started directly, Steam never spawns
-`gameoverlayui64.exe` for the session and never authorises it, so the renderer
-sits in the process with nothing to display and no input hook. That decision is
-made inside the Steam client; no environment variable reaches it.
-
-This is why `Shift+Tab` does nothing and invite dialogs come up blank when the
-game is launched straight from its folder.
-
-### What UCOnline2 does do
-
-Once Steam *has* launched the game, Steam sets the overlay environment for the
-**real** AppId. Since we then spoof the AppId, `SteamOverlayGameId` has to be
-re-pointed at the spoofed one (see [ogAppId](#ogappid)) or the overlay attaches
-to a game id the Steam client has no session for. UCOnline2 also fills in the
-rest of what Steam normally exports — `SteamClientLaunch`, `SteamPath`,
-`SteamAppUser` — before loading the renderer, since the overlay reads them once
-on attach.
-
-### Diagnosing it
-
-The startup log states the outcome directly:
-
-```
-[UCOnline2] Loaded game overlay: C:\...\GameOverlayRenderer64.dll
-[UCOnline2]   env: SteamGameId=480 SteamClientLaunch=1 SteamPath=... user=<account>
-[UCOnline2] Overlay: renderer module loaded, launched-by-Steam=1 (IsOverlayEnabled=...)
-```
-
-`launched-by-Steam=0` means the overlay will not work, whatever else looks right —
-add it as a Non-Steam Game. Note that `IsOverlayEnabled` reads `0` for the first
-few seconds even on a healthy launch, because the overlay is still attaching; it
-is reported for completeness and is not a verdict on its own.
 
 ## What this cannot fix
 
