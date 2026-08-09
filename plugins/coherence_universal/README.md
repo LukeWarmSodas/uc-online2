@@ -1,0 +1,116 @@
+# coherence_universal
+
+Gets past **coherence Cloud**'s platform login for games built on the
+[coherence](https://coherence.io) Unity SDK.
+
+## Confirmed working
+
+| Game | Steam AppId | SDK | Notes |
+|---|---|---|---|
+| **Vampire Survivors** | 1794680 | coherence 1.6 (IL2CPP) | Lobby created on our own coherence project, 2026-08-09. Also needs the runtime-key asset patch below. |
+
+## The wall
+
+coherence authenticates with a platform credential. On Steam that is
+`POST /login/steam` carrying a Steam auth session ticket, which coherence
+validates **server-side** against the publisher's project config (their Steam
+publisher key and real AppId). An emulated ticket minted for the spoofed AppId
+is rejected outright:
+
+```
+path=/login/steam method=POST statusCode=400
+errorCode=InvalidCredentials
+-> "Online Services are not available at the moment."
+```
+
+Not a weak check — it is judging a credential we cannot forge, the same class of
+wall as Photon's custom auth and EOS's `STEAM_SESSION_TICKET`.
+
+## The lever
+
+coherence exposes anonymous login as a first-class API, so we redirect to it:
+
+```csharp
+public static LoginOperation LoginWithSteam(string ticket, string identity, CancellationToken ct)
+public static LoginOperation LoginAsGuest(CancellationToken ct)
+```
+
+The plugin hooks three layers, whichever the game happens to use:
+
+- `Coherence.Cloud.AuthClient.LoginWithSteam` (low level)
+- `Coherence.Cloud.CoherenceCloud.LoginWithSteam` (static facade)
+- the game's own login entry point (for Vampire Survivors,
+  `VampireSurvivors.CoherenceLoginModule.Login`)
+
+**Hook the game's entry point, not the SDK's.** On Vampire Survivors both
+coherence-level hooks installed cleanly and never fired — the game reaches login
+by a path neither covers, and `dump.cs` shows signatures but not bodies, so the
+callee cannot be read off statically. Replacing `CoherenceLoginModule.Login` and
+driving the game's own `OnCompleteLogin` with a guest `LoginOperation` worked
+first try, because whatever `Login` called internally no longer runs.
+
+## Configuration — `[Coherence]` in `union-crax.ini`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ForceGuestLogin` | `true` | Redirect the Steam login to guest login. |
+| `ProjectId` | *(unset)* | Override `RuntimeSettings.projectID`. |
+| `RuntimeKey` | *(unset)* | Override `RuntimeSettings.runtimeKey`. **See the warning below.** |
+| `LocalMode` | `false` | Flip `localDevelopmentMode` and use a replication server on localhost — no Cloud, no account, no schema upload. |
+| `LaunchReplicationServer` | `true` | With `LocalMode`, start the game's own `replication-server.exe`. |
+
+## Two traps worth knowing
+
+**Do not hook trivial getters in an IL2CPP build.** `get_RuntimeKey` and friends
+are one-line accessors that load a string field; every identically-shaped getter
+compiles to the same code and the linker folds them into ONE function. Hooking
+that address hooks *every* string getter in the game — Unity's own parameter
+names and asset paths came back as the runtime key, and the game hung during
+addressable loading. Write the field instead (offsets from the il2cpp dump), and
+sanity-check that the slot already holds a readable string before writing.
+
+**The runtime key cannot be patched at runtime at all.** coherence captures it
+during `CoherenceBridge` init, roughly a second *before* UCOnline2 loads plugins
+(which happens at `SteamAPI_Init`, after Unity has booted). Patching the field,
+and even patching the string's characters in place, both left requests going to
+the publisher's project. It has to be patched in the game data:
+
+```
+VampireSurvivors_Data/globalgamemanagers.assets
+```
+
+Runtime keys are 32 hex characters, so it is a same-length byte replace — no
+offsets shift. Back up the file first.
+
+## Using your own coherence project
+
+1. Create a project; note its **runtime key**.
+2. Patch that key into the game data (above).
+3. Upload the game's schema to your project. The Hub uploads
+   `Toolkit.schema + Gathered.schema + activeSchemas + extraSchemas`, hashed as
+   `sha1(string.Join("\n", contents))`. Since a shipped game's `combined.schema`
+   already *contains* the toolkit components as an exact prefix, split it: write
+   everything after the toolkit prefix — **minus the single separator newline,
+   which `string.Join` supplies** — as `Assets/coherence/Gathered.schema`, then
+   upload without baking. Verify the dashboard shows the id the client asks for.
+4. Enable **all regions** on the project, or lobby creation fails with
+   `LobbyRegionNotFound`.
+
+Note `activeSchemas` comes from `ProjectSettings.instance.activeSchemas`, *not*
+`RuntimeSettings.schemas` — editing the latter has no effect on the upload.
+
+## Local mode
+
+`LocalMode=true` skips coherence Cloud entirely: it flips
+`RuntimeSettings.localDevelopmentMode` and starts the replication server the game
+already ships, pointed at the game's own schema. No project, no key, no upload,
+no auth. Untested at the time of writing, but it needs none of the Cloud setup
+above and the pieces are all present in a shipped build:
+
+```
+StreamingAssets/replication-server.exe   rooms --schema combined.schema
+StreamingAssets/combined.schema
+```
+
+Setting `RuntimeSettings.localHost` to a remote address would extend this to
+internet play against a self-hosted server.
