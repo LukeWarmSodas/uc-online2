@@ -329,6 +329,14 @@ set /p "EOS_SECRET=  EOS ClientSecret: "
 :ask_playfab
 if not defined HAS_PLAYFAB goto :ask_coherence
 echo.
+if defined HAS_COHERENCE (
+  echo   NOTE: this game also uses coherence, which is far more likely to be
+  echo   what multiplayer actually runs on. Plenty of games bundle the PlayFab
+  echo   SDK for storefront or account bits without using it for co-op.
+  echo   Leave this EMPTY unless you know otherwise -- with no TitleId the
+  echo   PlayFab plugin stays idle and installs no hooks at all.
+  echo.
+)
 set /p "PF_TITLE=  PlayFab TitleId (press Enter to skip): "
 
 :ask_coherence
@@ -515,7 +523,15 @@ if defined HAS_EOS (
   )
 )
 if defined HAS_PLAYFAB (
-  echo  PlayFab: set [PlayFab] TitleId if you skipped it.
+  if defined HAS_COHERENCE (
+    echo  PlayFab: the SDK is present, but coherence is almost certainly the
+    echo    multiplayer backend here. playfab_universal was copied in and is
+    echo    IDLE with no TitleId -- it installs no hooks and cannot affect the
+    echo    game's own PlayFab traffic. Get coherence working first; only set a
+    echo    TitleId if multiplayer clearly still needs PlayFab.
+  ) else (
+    echo  PlayFab: set [PlayFab] TitleId if you skipped it.
+  )
 )
 if defined HAS_COHERENCE (
   if defined COH_KEY (
