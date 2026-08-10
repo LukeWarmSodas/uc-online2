@@ -107,7 +107,31 @@ function Invoke-Unity([string] $Executable, [string[]] $Arguments, [string] $Des
     $argumentLine = ($Arguments | ForEach-Object { Quote-ProcessArgument $_ }) -join ' '
     $process = Start-Process -FilePath $Executable -ArgumentList $argumentLine -Wait -PassThru -NoNewWindow
     if ($process.ExitCode -ne 0) {
-        Fail "Unity exited with code $($process.ExitCode) while $Description. See $LogPath"
+        # Unity sometimes finishes the job and then crashes on the way out --
+        # observed as 0xC0000005 during shutdown, right after it fails to reach
+        # its own telemetry hosts (config.uca.cloud.unity3d.com and friends).
+        # The log still says the batch job completed:
+        #
+        #   Batchmode quit successfully invoked - shutting down!
+        #   Curl error 6: Could not resolve host: cdp.cloud.unity3d.com
+        #   Crash!!!
+        #
+        # Treating that as failure throws away completed work for a fault after
+        # the fact. Trust the log's own statement of completion over the exit
+        # code, and say clearly that it happened. The upload step does not rely
+        # on this: it is additionally gated on the pipeline's SUCCESS marker.
+        $completed = $false
+        if (Test-Path -LiteralPath $LogPath) {
+            $completed = (Select-String -LiteralPath $LogPath -SimpleMatch -Quiet `
+                            -Pattern 'Batchmode quit successfully invoked')
+        }
+
+        if ($completed) {
+            Write-Host "[UCO2] Unity exited $($process.ExitCode) but its log reports the batch job completed"
+            Write-Host "[UCO2] (crash during shutdown, typically while reaching Unity's cloud endpoints). Continuing."
+        } else {
+            Fail "Unity exited with code $($process.ExitCode) while $Description. See $LogPath"
+        }
     }
     Assert-File $LogPath 'Unity log'
 }

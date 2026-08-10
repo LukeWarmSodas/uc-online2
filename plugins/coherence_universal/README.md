@@ -141,7 +141,20 @@ runtime key: fce1ea692a854b50b9f945ef6aa17758
 ```
 
 Patch that into `VampireSurvivors_Data/globalgamemanagers.assets` in place of the
-32-character key already there (see below).
+32-character key already there (see below) — or just answer `SHARED` when
+`patch.bat` asks for a runtime key, and it does this for you.
+
+Schemas currently uploaded to it:
+
+| Build | Schema |
+|---|---|
+| 1.15.114 | `34701e1e7101dd9c6d0b5379d57936799ce0dc1c` |
+| 23591499 | `64649e4d63da323108ba010763b14bed03a075ae` |
+
+A coherence project holds several schemas at once, so one key covers multiple
+game builds. A build whose schema is not listed will authenticate and then fail
+with `SchemaNotFound` — the runtime key and the schema are separate things, and
+a game update changes the schema while leaving the key alone.
 
 **Availability is not guaranteed.** It runs on a free coherence tier, it is not
 monitored, and it may be rate-limited, rotated or taken down at any time without
