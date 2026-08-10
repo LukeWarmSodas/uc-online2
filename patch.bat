@@ -411,6 +411,17 @@ rem  harvest them where the game folder already tells us what they are.
 rem ============================================================
 >> "%INI%" echo(
 >> "%INI%" echo [DLC]
+>> "%INI%" echo ; UnlockAll answers any "do I own this DLC?" check, for any id,
+>> "%INI%" echo ; so DLC works without knowing what the ids are.
+>> "%INI%" echo ;
+>> "%INI%" echo ; The "appid=name" lines below are a separate thing: they are what
+>> "%INI%" echo ; a game reads when it ENUMERATES its DLC to build a menu.
+>> "%INI%" echo ; Both work together -- the list is checked first and UnlockAll is
+>> "%INI%" echo ; only the fallback, so you do NOT have to turn it off to use a list.
+>> "%INI%" echo ;
+>> "%INI%" echo ; Set UnlockAll=false when you want ONLY the ids listed here to
+>> "%INI%" echo ; count -- for instance if a game misbehaves once it is told it
+>> "%INI%" echo ; owns everything.
 >> "%INI%" echo UnlockAll=true
 
 rem Source 1: a gbe/Goldberg configs.app.ini already lists "<appid>=<name>"
@@ -443,6 +454,10 @@ if not defined DLC_FOUND (
   echo [INFO] No DLC ids found. UnlockAll still answers ownership checks; add
   echo        "^<appid^>=^<name^>" lines under [DLC] if a DLC menu comes up empty.
 )
+echo [INFO] DLC: UnlockAll=true is set, which is enough for most games. The id
+echo        list is only needed by games that ENUMERATE their DLC, and the two
+echo        work together -- set UnlockAll=false in the ini only if you want
+echo        ONLY the listed ids to count.
 
 if not defined FLAVOR goto :ini_eos
 >> "%INI%" echo(
