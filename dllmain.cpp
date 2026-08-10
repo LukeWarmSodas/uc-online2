@@ -92,6 +92,11 @@ uint32 g_OriginalAppId = 0;
 // (see the ISteamUser hooks further down).
 static bool g_bEmulateAuthTicket = false;
 
+// Defined further down; DllMain preloads the donor ticket through it so the
+// donor SteamID is known BEFORE any vtable hooks are built.
+#include <vector>
+static const std::vector<uint8_t>& UcoDonorTicket();
+
 Fn_CreateInterface g_pfnCreateInterface = nullptr;
 Fn_ReleaseThreadLocal g_pfnReleaseThreadLocal = nullptr;
 Fn_IsKnownInterface g_pfnIsKnownInterface = nullptr;
@@ -537,6 +542,16 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 			uint32 emulatedAppId = s_PluginLoader.GetOgAppId();
 			if (emulatedAppId == 0) emulatedAppId = s_PluginLoader.GetAppId();
 			CSteamUserStub::SetEmulatedApp(emulatedAppId);
+
+			// Load the donor ticket NOW, not on first use.
+			//
+			// The auth hooks are built when the game asks for ISteamUser, which
+			// happens long before it requests a ticket. Loading lazily left the
+			// donor SteamID unknown at hook-install time, so the GetSteamID
+			// entry was skipped and the identity spoof silently never armed --
+			// the log said 6/6 hooks instead of 7/7 and the ticket still went
+			// out under the real account.
+			UcoDonorTicket();
 		}
 	}
 	else if (dwReason == DLL_PROCESS_DETACH)
@@ -1628,10 +1643,118 @@ static const uint32_t TICKET_VER   = 4;
 
 } // namespace uco_ticket
 
+// ------------------------------------------------------------
+// Donor ticket ([Settings] TicketFile)
+//
+// A REAL, Valve-signed auth ticket minted by an account that owns the game,
+// read from disk and replayed verbatim. This is the only thing that passes a
+// publisher server which actually verifies the signature -- our synthetic
+// ticket below is structurally correct but its signature field is zeroed,
+// because forging it needs Valve's private key.
+//
+// Loaded once and cached: the file is read on first use, and a failure is
+// logged once rather than on every ticket request.
+// ------------------------------------------------------------
+static std::vector<uint8_t> g_DonorTicket;
+static bool                 g_bDonorTicketTried = false;
+static uint64               g_DonorSteamId      = 0;
+
+// Find the SteamID inside a ticket. Individual-account SteamIDs have the
+// constant high word 0x0110000100000000, so scanning for that pattern locates
+// it without hard-coding an offset that shifts between ticket layouts.
+static uint64 UcoFindTicketSteamId(const uint8_t* p, size_t cb)
+{
+    if (!p || cb < 8) return 0;
+    const size_t limit = (cb < 128 ? cb : 128) - 8;
+    for (size_t i = 0; i <= limit; ++i)
+    {
+        uint64 v = 0;
+        memcpy(&v, p + i, sizeof(v));
+        if ((v >> 32) == 0x01100001ULL)
+            return v;
+    }
+    return 0;
+}
+
+static const std::vector<uint8_t>& UcoDonorTicket()
+{
+    if (g_bDonorTicketTried)
+        return g_DonorTicket;
+    g_bDonorTicketTried = true;
+
+    const char* path = s_PluginLoader.GetTicketFile();
+    if (!path || !path[0])
+        return g_DonorTicket;
+
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") != 0 || !f)
+    {
+        UCOLOG("[UCOnline2] TicketFile: cannot open %s -- falling back to the "
+               "synthetic ticket (which official servers WILL reject)", path);
+        return g_DonorTicket;
+    }
+
+    fseek(f, 0, SEEK_END);
+    const long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len > 0 && len < 64 * 1024)
+    {
+        g_DonorTicket.resize((size_t)len);
+        if (fread(g_DonorTicket.data(), 1, (size_t)len, f) != (size_t)len)
+            g_DonorTicket.clear();
+    }
+    fclose(f);
+
+    if (g_DonorTicket.empty())
+    {
+        UCOLOG("[UCOnline2] TicketFile: %s is empty or unreadable", path);
+        return g_DonorTicket;
+    }
+
+    // Everything needed to tell a good ticket from a bad one at a glance.
+    // A donor ticket MUST have a non-zero signature -- if the tail is all
+    // zeroes it is one of our synthetic tickets, saved by mistake, and it
+    // will fail exactly like no ticket at all.
+    bool sigNonZero = false;
+    if (g_DonorTicket.size() >= uco_ticket::SIG_LEN)
+    {
+        const uint8_t* sig = g_DonorTicket.data() + g_DonorTicket.size() - uco_ticket::SIG_LEN;
+        for (size_t i = 0; i < uco_ticket::SIG_LEN; ++i)
+            if (sig[i]) { sigNonZero = true; break; }
+    }
+
+    g_DonorSteamId = UcoFindTicketSteamId(g_DonorTicket.data(), g_DonorTicket.size());
+    UCOLOG("[UCOnline2] TicketFile: loaded %zu bytes from %s", g_DonorTicket.size(), path);
+    UCOLOG("[UCOnline2]   ticket SteamID = %llu   signature = %s",
+        (unsigned long long)UcoFindTicketSteamId(g_DonorTicket.data(), g_DonorTicket.size()),
+        sigNonZero ? "NON-ZERO (real, Valve-signed)"
+                   : "ALL ZERO -- this is a synthetic ticket, it will be REJECTED");
+    return g_DonorTicket;
+}
+
 static uint32 UcoBuildSteamAuthTicket(void* pTicket, int cbMaxTicket,
                                       uint32 appId, uint64 steamId)
 {
     using namespace uco_ticket;
+
+    // A real donor ticket wins over anything we can build. Replayed verbatim:
+    // the signature covers the bytes, so altering any field invalidates it --
+    // including the SteamID, which is why every client using one connects as
+    // the donor account rather than as itself.
+    const std::vector<uint8_t>& donor = UcoDonorTicket();
+    if (!donor.empty())
+    {
+        if (cbMaxTicket < (int)donor.size())
+        {
+            UCOLOG("[UCOnline2] TicketFile: donor ticket is %zu bytes but the game "
+                   "offered only %d -- cannot deliver it", donor.size(), cbMaxTicket);
+            return 0;
+        }
+        memcpy(pTicket, donor.data(), donor.size());
+        UCOLOG("[UCOnline2] Served DONOR ticket: %zu bytes (appid=%u, our SteamID=%llu)",
+            donor.size(), appId, (unsigned long long)steamId);
+        return (uint32)donor.size();
+    }
 
     const uint32_t now = (uint32_t)time(nullptr);
     const uint32_t startupSecs = (uint32_t)(GetTickCount64() / 1000ULL);
@@ -1703,6 +1826,56 @@ static uint32 UcoBuildSteamAuthTicket(void* pTicket, int cbMaxTicket,
     return (uint32)total;
 }
 
+// Report the DONOR's SteamID as ours while a donor ticket is in use.
+//
+// The signature covers the SteamID, so a replayed ticket always names the
+// account that minted it. Presenting that ticket while connecting as somebody
+// else gives the server two different identities for one client: it calls
+// BeginAuthSession, Steam resolves the ticket to the donor, and the mismatch
+// is grounds to refuse. OnlineFix avoids this by having every client appear as
+// the donor -- "they all connect as that one SteamID" -- which is the same
+// thing this does.
+//
+// Only active with [Settings] TicketFile, and off by default otherwise: this
+// changes the identity the game sees for friends, saves and profiles, which is
+// not something to do to someone who did not ask for it.
+// CSteamID is returned BY VALUE, and that is an ABI trap.
+//
+// It has user-defined constructors, so MSVC does not return it in RAX -- it
+// uses a hidden return-buffer pointer. Where that pointer sits differs between
+// a free function and a member function, so a plain free-function detour gets
+// `this` and the return buffer the wrong way round and writes through a bogus
+// pointer. That crashed the game on the first attempt.
+//
+// Declaring the detour as a MEMBER function sidesteps the question entirely:
+// the compiler emits exactly the convention the vtable slot expects, whatever
+// that happens to be on this target.
+struct UcoSteamUserDetour
+{
+    CSteamID GetSteamID()
+    {
+        static bool logged = false;
+        if (!logged)
+        {
+            logged = true;
+            UCOLOG("[UCOnline2] GetSteamID -> %llu (donor, from the ticket) "
+                   "instead of the real account", (unsigned long long)g_DonorSteamId);
+        }
+        return CSteamID((uint64)g_DonorSteamId);
+    }
+};
+
+// Member-function pointers are not convertible to void* by any standard cast,
+// so go through a union. This is the one place that is justified: the value is
+// a plain code address and MinHook only needs it as such.
+static void* UcoGetSteamIDDetourAddr()
+{
+    union { CSteamID (UcoSteamUserDetour::*pmf)(); void* p; } u;
+    u.p = nullptr;
+    u.pmf = &UcoSteamUserDetour::GetSteamID;
+    return u.p;
+}
+
 static HAuthTicket UcoEmitAuthTicket(void* pTicket, int cbMaxTicket, uint32* pcbTicket)
 {
     uint64 steamId = 0;
@@ -1721,7 +1894,19 @@ static HAuthTicket UcoEmitAuthTicket(void* pTicket, int cbMaxTicket, uint32* pcb
     }
     if (pcbTicket) *pcbTicket = cb;
 
-    const HAuthTicket handle = (HAuthTicket)InterlockedCompareExchange(&g_NextAuthTicket, 0, 0);
+    // Allocate the handle HERE, and never hand back zero.
+    //
+    // k_HAuthTicketInvalid is 0, so a zero handle tells the game the request
+    // failed -- whatever bytes it also received. This used to read the counter
+    // back instead of advancing it, which worked only because the synthetic
+    // builder happened to increment it first. The donor-ticket path returns
+    // before that, so every donor ticket was delivered with handle=0: the game
+    // got a valid, Valve-signed ticket and was simultaneously told the call had
+    // failed, and refused to connect.
+    LONG next = InterlockedIncrement(&g_NextAuthTicket);
+    if (next == 0)
+        next = InterlockedIncrement(&g_NextAuthTicket);
+    const HAuthTicket handle = (HAuthTicket)next;
 
     GetAuthSessionTicketResponse_t resp = {};
     resp.m_hAuthTicket = handle;
@@ -1901,22 +2086,30 @@ void UcoInstallUserAuthHooks(void* pIface, const char* ver)
                           ? (void*)&Hooked_GetAuthSessionTicket4
                           : (void*)&Hooked_GetAuthSessionTicket3;
 
-    struct Item { int index; void* detour; const char* name; };
+    // index < 0 means "not applicable to this configuration" and is skipped.
+    // orig is non-null only for detours that actually call through.
+    struct Item { int index; void* detour; const char* name; void** orig; };
     const Item items[] = {
-        { L.initiate, (void*)&Hooked_InitiateGameConnection, "InitiateGameConnection" },
-        { L.terminate, (void*)&Hooked_TerminateGameConnection, "TerminateGameConnection" },
-        { L.getTicket, getTicketDetour,             "GetAuthSessionTicket" },
-        { L.begin,     (void*)&Hooked_BeginAuthSession, "BeginAuthSession" },
-        { L.end,       (void*)&Hooked_EndAuthSession,   "EndAuthSession" },
-        { L.cancel,    (void*)&Hooked_CancelAuthTicket, "CancelAuthTicket" },
+        { L.initiate, (void*)&Hooked_InitiateGameConnection, "InitiateGameConnection", nullptr },
+        { L.terminate, (void*)&Hooked_TerminateGameConnection, "TerminateGameConnection", nullptr },
+        { L.getTicket, getTicketDetour,             "GetAuthSessionTicket", nullptr },
+        { L.begin,     (void*)&Hooked_BeginAuthSession, "BeginAuthSession", nullptr },
+        { L.end,       (void*)&Hooked_EndAuthSession,   "EndAuthSession", nullptr },
+        { L.cancel,    (void*)&Hooked_CancelAuthTicket, "CancelAuthTicket", nullptr },
+        // GetSteamID is index 2 on every ISteamUser version -- the layout only
+        // diverges further down -- so it needs no per-version entry.
+        { g_DonorSteamId ? 2 : -1, UcoGetSteamIDDetourAddr(), "GetSteamID (donor identity)", nullptr },
     };
 
-    int ok = 0;
+    int ok = 0, want = 0;
     for (const Item& it : items)
     {
+        if (it.index < 0) continue;                // not applicable here
+        ++want;
         void* target = vt[it.index];
-        void* dummyOriginal = nullptr;             // detours never call through
-        MH_STATUS st = MH_CreateHook(target, it.detour, &dummyOriginal);
+        void* dummyOriginal = nullptr;
+        MH_STATUS st = MH_CreateHook(target, it.detour,
+                                     it.orig ? it.orig : &dummyOriginal);
         if (st == MH_ERROR_ALREADY_CREATED)        // shared impl across versions
         {
             ++ok;
@@ -1929,8 +2122,9 @@ void UcoInstallUserAuthHooks(void* pIface, const char* ver)
                 ver, it.name, it.index, st);
     }
 
-    UCOLOG("[UCOnline2] auth ticket emulation: %d/6 hooks installed on %s%s",
-        ok, ver, L.ticketTakesIdentity ? "" : " (3-arg ticket variant)");
+    UCOLOG("[UCOnline2] auth ticket emulation: %d/%d hooks installed on %s%s%s",
+        ok, want, ver, L.ticketTakesIdentity ? "" : " (3-arg ticket variant)",
+        g_DonorSteamId ? " [donor identity active]" : "");
 }
 
 void InstallSteamSpoofHooks()

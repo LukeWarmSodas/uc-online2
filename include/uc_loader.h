@@ -193,6 +193,20 @@ uint32 GetOgAppId()
 		return IniReadBool("VerboseLog", false);
 	}
 
+	// [Settings] TicketFile -- path to a REAL auth ticket minted by an account
+	// that owns the game. Replayed verbatim in place of the synthetic ticket,
+	// which official servers reject because its signature field is zeroed.
+	// Relative paths resolve against the working directory, so prefer absolute.
+	const char* GetTicketFile()
+	{
+		if (m_IniPath[0] == '\0')
+			return "";
+
+		static char s_Path[MAX_PATH];
+		IniReadString("TicketFile", "", s_Path, sizeof(s_Path));
+		return s_Path;
+	}
+
 	bool GetWarnOverlayDisabled()
 	{
 		if (m_IniPath[0] == '\0')
