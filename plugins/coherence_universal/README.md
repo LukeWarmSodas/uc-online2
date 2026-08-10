@@ -3,11 +3,42 @@
 Gets past **coherence Cloud**'s platform login for games built on the
 [coherence](https://coherence.io) Unity SDK.
 
+## Quick start — you probably do not need to read the rest of this
+
+**Drag the game folder onto `patch.bat`.** It detects coherence and does the
+whole thing: deploys this plugin, writes the `[Coherence]` ini section, patches
+the runtime key into the game data, fills in the DLC section, and offers to run
+the schema upload tool first if you are bringing your own project.
+
+When it asks for a runtime key, answer:
+
+```
+SHARED
+```
+
+and you are done — that uses a community project whose schema is already
+uploaded and whose regions are enabled. No coherence account, no Unity, no
+schema upload. Availability is not guaranteed; see
+[Shared project](#shared-project-no-setup).
+
+Already set up and just want to point a game at a different project?
+
+```
+patch.bat "C:\path\to\game" /keyonly
+```
+
+Everything below is the manual route and the reasoning behind it — useful for a
+coherence game patch.bat has not been taught about, or when something has gone
+wrong and you need to know what it was trying to do.
+
 ## Confirmed working
 
 | Game | Steam AppId | SDK | Notes |
 |---|---|---|---|
-| **Vampire Survivors** | 1794680 | coherence 1.6 (IL2CPP) | Lobby created on our own coherence project, 2026-08-09. Also needs the runtime-key asset patch below. |
+| **Vampire Survivors** 1.15.114 | 1794680 | coherence 1.6 (IL2CPP) | Lobby created on our own coherence project, 2026-08-09. |
+| **Vampire Survivors** build 23591499 | 1794680 | coherence 1.6 (IL2CPP) | Same key, **different schema** — a game update changes the schema and leaves the runtime key alone. |
+
+Both need the runtime key patched into the game data, which `patch.bat` does.
 
 ## The wall
 
@@ -82,7 +113,10 @@ VampireSurvivors_Data/globalgamemanagers.assets
 Runtime keys are 32 hex characters, so it is a same-length byte replace — no
 offsets shift. Back up the file first.
 
-### Reproducing the patch
+### Doing it by hand
+
+`patch.bat` does all of this for you, including finding the key — this section
+is for other coherence games, or for checking its work.
 
 **1. Find the game's current runtime key.** The easiest way is to let the plugin
 tell you: put *any* 32-character value in `[Coherence] RuntimeKey`, run the game
@@ -170,8 +204,12 @@ access to the project.
 
 ## Using your own coherence project
 
+`patch.bat` offers to run the schema upload tool before it asks for a key, which
+covers steps 2 and 3 below. The list is what it is doing on your behalf.
+
 1. Create a project; note its **runtime key**.
-2. Patch that key into the game data (above).
+2. Patch that key into the game data (above) — or just give the key to
+   `patch.bat`.
 3. Upload the game's schema to your project. The Hub uploads
    `Toolkit.schema + Gathered.schema + activeSchemas + extraSchemas`, hashed as
    `sha1(string.Join("\n", contents))`. Since a shipped game's `combined.schema`
