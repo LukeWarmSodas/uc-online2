@@ -223,6 +223,38 @@ covers steps 2 and 3 below. The list is what it is doing on your behalf.
 Note `activeSchemas` comes from `ProjectSettings.instance.activeSchemas`, *not*
 `RuntimeSettings.schemas` — editing the latter has no effect on the upload.
 
+### When the game does not ship `combined.schema`
+
+Many coherence games (e.g. Lost Skies) do **not** drop a loose
+`combined.schema` — the schema is baked into
+`<Game>_Data/globalgamemanagers.assets` instead. Recover it first:
+
+```powershell
+tools\coherence_schema\Extract-CoherenceSchema.ps1 "C:\path\to\game"
+```
+
+That writes `combined.schema`, `Toolkit.schema` and `Gathered.schema` next to the
+assets file. It is **self-validating**: each schema's bytes are checked against
+the sha1 id stored beside it, and the reconstructed combined is checked against
+the id the client will actually request (also baked into the file). If it prints
+`MATCH`, upload with confidence; if it warns, the schema set for that game
+differs and needs a look before uploading. Then feed the pipeline both files:
+
+```powershell
+tools\coherence_schema\Invoke-CoherenceSchemaPipeline.ps1 -ProjectPath <unity project> `
+    -CombinedSchemaPath <out>\combined.schema `
+    -ToolkitSchemaPath  <out>\Toolkit.schema
+```
+
+**How it works.** Each baked schema is a coherence `SchemaDefinition`:
+`[len][text][name][len][sha1 id][components…]`. Because the stored id is
+`sha1(text)`, a wrong extraction can't hide. The combined id the client requests
+is `sha1( lf(Toolkit) + "\n" + Gathered )` — the authored `Toolkit.schema` is
+CRLF, `Gathered.schema` is LF, and the bake normalises Toolkit to LF before
+hashing. Don't hand-carve the text out with a hex editor: reading from the first
+`component` line to "the end" overshoots into the next serialized field and
+produces a schema that uploads clean but is silently rejected server-side.
+
 ## Local mode
 
 `LocalMode=true` skips coherence Cloud entirely: it flips

@@ -20,10 +20,29 @@ The pipeline does not guess a schema boundary. It requires the shipped
 then writes the remaining content after exactly one separator newline to
 `Assets/coherence/Gathered.schema`.
 
+## If the game does not ship `combined.schema`
+
+Many coherence games bake the schema into
+`<Game>_Data/globalgamemanagers.assets` and ship no loose `combined.schema`.
+Run `Extract-CoherenceSchema.ps1` first to recover it:
+
+```powershell
+.\Extract-CoherenceSchema.ps1 "C:\path\to\game"
+```
+
+It writes `combined.schema`, `Toolkit.schema` and `Gathered.schema` next to the
+assets file, self-validated against the sha1 ids baked in alongside each schema
+(and against the combined id the client will request). Pass the first two on to
+the pipeline via `-CombinedSchemaPath` and `-ToolkitSchemaPath`. See the plugin
+README's "When the game does not ship combined.schema" for the byte layout and
+why a hand-carve fails.
+
 ## What the user needs
 
 - The Unity project folder they want to use for the upload.
-- The game's `StreamingAssets/combined.schema` file.
+- The game's `combined.schema` — either the shipped
+  `StreamingAssets/combined.schema`, or the one `Extract-CoherenceSchema.ps1`
+  recovers from `globalgamemanagers.assets` (above).
 - The matching Unity Editor installed through Unity Hub. The script reads the
   required version from `ProjectSettings/ProjectVersion.txt`.
 - Their coherence organization ID, project ID, and project token.
