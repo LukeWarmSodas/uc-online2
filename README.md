@@ -2,6 +2,14 @@
 
 Custom modified Steam API .dll for Steam games to spoof your game as Spacewar. Drop-in replacement for `steam_api.dll` / `steam_api64.dll`.
 
+> ### ⚠️ You are on the `beta` branch
+> This branch is `main` plus **one experimental feature**: replaying a real,
+> owner-minted Steam auth ticket to get past servers that verify ticket
+> ownership — the wall that [What this cannot fix](#what-this-cannot-fix) calls
+> unforgeable. It is **inert unless you set `[Settings] TicketFile`**, so a normal
+> install behaves exactly like `main`. Details:
+> [Beta: replaying a real owned ticket](#beta-replaying-a-real-owned-ticket).
+
 ## Quick start — `patch.bat`
 
 **Drag your game folder onto `patch.bat`.** It works out what the game needs and
@@ -235,6 +243,57 @@ to a machine you do not control, the answer is no.
 **What still works:** everything validated *peer-side*. Games where multiplayer is
 Steam lobbies plus P2P, or where the host itself validates the joining player, are
 the normal case and are what this project is for.
+
+## Beta: replaying a real owned ticket
+
+*This section exists only on the `beta` branch.*
+
+The wall above cannot be **forged** — but it can be **satisfied** with a real
+ticket from an account that genuinely owns the game. That is exactly how the
+competing fixes pass it (see the Farming Simulator 25 note above), and this branch
+adds a first-class way to do the same.
+
+**`[Settings] TicketFile`** points at a real auth ticket saved to disk. When it is
+set:
+
+- `GetAuthSessionTicket` serves those bytes **verbatim** instead of the synthetic
+  ticket — the synthetic one has a zeroed 128-byte signature, which is what gets
+  it rejected server-side.
+- `GetSteamID` is spoofed to the SteamID embedded in the ticket, so the account
+  the server authenticates matches the credential it was handed. (The detour is a
+  member function on purpose: `CSteamID` is returned by value with a user-defined
+  constructor, so a free-function detour gets the ABI wrong and crashes.)
+
+```ini
+[Settings]
+TicketFile=C:\path\to\ticket.bin
+```
+
+**Getting a ticket.** It has to come from an account that owns the game — there is
+no client-side shortcut. The `mint_ticket` helper is run by that owner against
+their own Steam login and writes the ticket to a file, which they send to you. It
+waits for Steam to confirm the ticket (callback `163`) before saving, because the
+bytes exist immediately but are not valid until Steam says so.
+
+**Proven on Farming Simulator 25.** With a ticket from an account that *owns* the
+game (`ownershipFlags 0x0`) the game joins official servers through the emulator.
+A **family-shared** ticket (`ownershipFlags 0x2`) is refused server-side — that
+flag lives inside the Valve-signed blob, so a borrowed licence cannot be made to
+pass. The practical rule: **the donor must own the game outright.**
+
+Look for this in `%TEMP%/uc_online2.log`:
+
+```
+[UCOnline2] auth ticket emulation: 7/7 hooks installed on SteamUser023 [donor identity active]
+[UCOnline2] GetSteamID -> 7656119... (donor, from the ticket) instead of the real account
+[UCOnline2] Served DONOR ticket: 234 bytes (appid=..., our SteamID=7656119...)
+```
+
+**Why this is beta and not `main`:** it helps only the narrow class of
+ownership-ticket walls; it needs a real donor ticket, which expires (~21 days) and
+makes everyone using it connect as that one SteamID; and account sharing is
+against Steam's terms. It changes nothing on a normal install — the whole feature
+is gated behind `TicketFile` being set.
 
 ## Plugin Loader / Injector
 
