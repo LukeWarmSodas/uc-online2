@@ -67,7 +67,33 @@ public:
         s_entries.clear();
         if (!iniPath || !iniPath[0]) return;
 
-        s_unlockAll = GetPrivateProfileIntA("DLC", "UnlockAll", 0, iniPath) != 0;
+        // Read as a STRING, not with GetPrivateProfileInt.
+        //
+        // GetPrivateProfileInt only understands digits, so "UnlockAll=true" --
+        // the spelling the README documents and patch.bat writes -- parsed as
+        // the default, 0. The feature silently did nothing for every user who
+        // followed the documentation; it only ever appeared to work when a
+        // game also had explicit <appid>=<name> entries doing the real work.
+        //
+        // Accept the same truthy values as the rest of the ini, and still take
+        // 1/0 so existing configs keep working.
+        {
+            char raw[64] = { 0 };
+            GetPrivateProfileStringA("DLC", "UnlockAll", "", raw, sizeof(raw), iniPath);
+
+            // Windows does not strip inline comments, so "true ; why" arrives
+            // whole. Cut at a comment marker that follows whitespace.
+            for (char* c = raw; *c; ++c) {
+                if ((*c == '#' || *c == ';') && c > raw && (c[-1] == ' ' || c[-1] == '\t')) { *c = '\0'; break; }
+            }
+            char* p = raw;
+            while (*p == ' ' || *p == '\t') ++p;
+            size_t len = strlen(p);
+            while (len && (p[len-1] == ' ' || p[len-1] == '\t')) p[--len] = '\0';
+
+            s_unlockAll = (_stricmp(p, "true") == 0) || (_stricmp(p, "yes") == 0) ||
+                          (_stricmp(p, "on")   == 0) || (_stricmp(p, "1")   == 0);
+        }
 
         // Every key in [DLC] except UnlockAll is "<appid>=<name>". Passing a null
         // key name yields the section's key names as a double-null-terminated
