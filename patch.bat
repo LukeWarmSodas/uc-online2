@@ -90,6 +90,15 @@ set "DATA="
 set "GAME_EXE="
 
 for /d %%D in ("%GAME%\*_Data") do set "DATA=%%~fD"
+
+rem Some repacks nest the game one level down and put a loader at the top --
+rem gbe's ColdClientLoader does exactly this ("Vampire Survivors.exe" beside a
+rem "Vampire Survivors\" folder holding the real game). Only checking the top
+rem level makes patch.bat report "could not identify the engine" for a perfectly
+rem ordinary Unity game, so fall back to a recursive search.
+if not defined DATA (
+  for /d /r "%GAME%" %%D in (*_Data) do if not defined DATA set "DATA=%%~fD"
+)
 if defined DATA set "ENGINE=Unity"
 
 if not defined ENGINE (
@@ -108,6 +117,18 @@ if not defined ENGINE (
   echo   Looked for a "<Game>_Data" folder ^(Unity^) and a
   echo   "*-Win64-Shipping.exe" ^(Unreal^) and found neither.
   goto :end
+)
+
+rem A competing emulator's loader will fight ours: gbe's ColdClientLoader
+rem injects its own steamclient64.dll, so the game talks to that instead of the
+rem real Steam client UCOnline2 needs.
+if exist "%GAME%\steamclient64.ini" (
+  echo.
+  echo [WARN] This folder has a gbe/ColdClientLoader setup ^(steamclient64.ini^).
+  echo        UCOnline2 is a passthrough and needs the REAL Steam client, but
+  echo        that loader injects its own steamclient64.dll instead. Launch the
+  echo        game's own exe directly rather than the loader in this folder.
+  echo.
 )
 
 echo Engine:      %ENGINE%
@@ -166,7 +187,10 @@ rem  never read: the emulator falls back to AppId=480 with no ogAppId and logs
 rem  "No usable ogAppId". PluginsFolder is relative to the same place, so
 rem  plugins\ belongs here too.
 rem ============================================================
+rem For Unity the exe sits beside <Game>_Data, which is NOT necessarily the
+rem folder that was dropped on this script -- see the nested-layout note above.
 set "INI_DIR=%GAME%"
+if "%ENGINE%"=="Unity"  for %%F in ("%DATA%") do set "INI_DIR=%%~dpF"
 if "%ENGINE%"=="Unreal" for %%F in ("%GAME_EXE%") do set "INI_DIR=%%~dpF"
 if "%INI_DIR:~-1%"=="\" set "INI_DIR=%INI_DIR:~0,-1%"
 echo Config dir:  %INI_DIR%
