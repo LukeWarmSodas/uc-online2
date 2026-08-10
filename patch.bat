@@ -359,18 +359,26 @@ rem The shared project's RUNTIME key. Safe to publish: a runtime key is a
 rem client-side identifier that ships inside every coherence game by design,
 rem like a Photon AppId. Portal/service tokens are a different thing entirely
 rem and must never appear here.
+set "COH_SHARED="
 if /i "%COH_KEY%"=="shared" (
   set "COH_KEY=fce1ea692a854b50b9f945ef6aa17758"
+  set "COH_SHARED=1"
   echo.
-  echo   Using the shared project. It is a free tier, unmonitored, and shared
-  echo   with everyone else using it -- if co-op stops working, suspect this
-  echo   first and set up your own project.
+  echo   Using the shared project -- its schema is already uploaded, so there
+  echo   is nothing else to do. It is a free tier, unmonitored, and shared with
+  echo   everyone else using it: if co-op stops working, suspect this first and
+  echo   set up your own project.
 )
-echo.
-echo   NOTE: your project also needs the game's schema uploaded to it, which
-echo   requires the Unity editor. tools\coherence_schema automates that, or
-echo   the plugin README lists a shared project usable with no Unity at all.
-echo   Without a matching schema the game fails with SchemaNotFound.
+
+rem Only relevant to someone bringing their OWN project. Printing it after a
+rem SHARED answer tells people they need Unity immediately after they chose the
+rem route that does not, which reads as a warning that something is missing.
+if not defined COH_SHARED if defined COH_KEY (
+  echo.
+  echo   NOTE: your project also needs the game's schema uploaded to it, which
+  echo   requires the Unity editor. tools\coherence_schema automates that.
+  echo   Without a matching schema the game fails with SchemaNotFound.
+)
 
 rem ============================================================
 rem  Write union-crax.ini  (sequential appends -- robust)
@@ -383,6 +391,58 @@ set "INI=%INI_DIR%\union-crax.ini"
 >> "%INI%" echo ogAppId=%OGAPPID%
 >> "%INI%" echo PluginsFolder=plugins
 >> "%INI%" echo GetStubbedLol=false
+
+rem ============================================================
+rem  [DLC]
+rem
+rem  Games ask about DLC two different ways and both have to be answered:
+rem
+rem    "do I own 211?"  -> BIsSubscribedApp / BIsDlcInstalled
+rem    "list my DLC"    -> GetDLCCount + BGetDLCDataByIndex
+rem
+rem  UnlockAll=true answers the first for ANY id without knowing them, so it is
+rem  always written -- nobody should have to go hunting for a DLC list just to
+rem  get their content working.
+rem
+rem  It does NOT answer the second: GetDLCCount falls back to Steam's count
+rem  (zero, for a spoofed app) when we have no entries, so a game that builds
+rem  its DLC menu by enumerating still shows nothing. That needs real ids, so
+rem  harvest them where the game folder already tells us what they are.
+rem ============================================================
+>> "%INI%" echo(
+>> "%INI%" echo [DLC]
+>> "%INI%" echo UnlockAll=true
+
+rem Source 1: a gbe/Goldberg configs.app.ini already lists "<appid>=<name>"
+rem under [app::dlcs] -- exactly the format we want, names included.
+set "DLC_SRC="
+for /r "%GAME%" %%F in (configs.app.ini) do (
+  if exist "%%~fF" if not defined DLC_SRC set "DLC_SRC=%%~fF"
+)
+set "DLC_FOUND="
+if defined DLC_SRC (
+  for /f "usebackq tokens=1,* delims==" %%A in (`findstr /r /c:"^[0-9][0-9]*=" "!DLC_SRC!"`) do (
+    >> "%INI%" echo %%A=%%B
+    set "DLC_FOUND=1"
+  )
+  if defined DLC_FOUND echo [OK] DLC ids taken from !DLC_SRC!
+)
+
+rem Source 2: many repacks drop one folder per DLC named for its AppId.
+if not defined DLC_FOUND (
+  for /d %%D in ("%INI_DIR%\*") do (
+    echo %%~nxD| findstr /r /c:"^[0-9][0-9]*$" >nul && (
+      >> "%INI%" echo %%~nxD=DLC %%~nxD
+      set "DLC_FOUND=1"
+    )
+  )
+  if defined DLC_FOUND echo [OK] DLC ids taken from the AppId-named folders in the game directory.
+)
+
+if not defined DLC_FOUND (
+  echo [INFO] No DLC ids found. UnlockAll still answers ownership checks; add
+  echo        "^<appid^>=^<name^>" lines under [DLC] if a DLC menu comes up empty.
+)
 
 if not defined FLAVOR goto :ini_eos
 >> "%INI%" echo(
