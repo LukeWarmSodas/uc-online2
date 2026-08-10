@@ -353,6 +353,20 @@ echo.
 echo   Type SHARED to use the community project instead -- no coherence
 echo   account, no Unity, no schema upload. Availability is not guaranteed.
 echo.
+
+rem Offer the upload BEFORE asking for a key: you cannot give a runtime key for
+rem a project you have not set up yet, and a key without a matching schema gets
+rem you a SchemaNotFound that looks like the key being wrong.
+call :find_schema_tool
+if defined SCHEMA_TOOL (
+  echo   Not uploaded the schema to your own project yet? patch.bat can run the
+  echo   upload tool now. It needs the Unity editor. Skip this if you are using
+  echo   SHARED, or if you have already uploaded this build's schema.
+  echo.
+  set /p "COH_UPLOAD=  Run the schema upload tool first? (y/N): "
+  if /i "!COH_UPLOAD!"=="y" call :run_schema_tool
+  echo.
+)
 set /p "COH_KEY=  coherence runtime key, or SHARED (press Enter to skip): "
 
 rem The shared project's RUNTIME key. Safe to publish: a runtime key is a
@@ -625,6 +639,48 @@ echo.
 echo  Log: %%TEMP%%\uc_online2.log
 echo ============================================================
 goto :end
+
+rem ------------------------------------------------------------
+rem  :find_schema_tool  -> SCHEMA_TOOL
+rem
+rem  Ships beside patch.bat in a release zip and lives at the same relative
+rem  path in a repo checkout, so one lookup covers both.
+rem ------------------------------------------------------------
+:find_schema_tool
+set "SCHEMA_TOOL="
+if exist "%SCRIPTDIR%tools\coherence_schema\Invoke-CoherenceSchemaPipeline.ps1" (
+  set "SCHEMA_TOOL=%SCRIPTDIR%tools\coherence_schema\Invoke-CoherenceSchemaPipeline.ps1"
+)
+goto :eof
+
+rem ------------------------------------------------------------
+rem  :run_schema_tool
+rem
+rem  The game's combined.schema is already known from the detection above, so
+rem  pass it through rather than making the user find it. Everything else the
+rem  tool prompts for itself.
+rem ------------------------------------------------------------
+:run_schema_tool
+set "COMBINED="
+for /r "%GAME%" %%F in (combined.schema) do (
+  if exist "%%~fF" if not defined COMBINED set "COMBINED=%%~fF"
+)
+echo.
+echo   Launching the schema upload tool. It will ask for your Unity project and
+echo   your coherence project id and token; the game's schema is filled in.
+echo.
+if defined COMBINED (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCHEMA_TOOL%" -CombinedSchemaPath "%COMBINED%"
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCHEMA_TOOL%"
+)
+if errorlevel 1 (
+  echo.
+  echo   [WARN] The schema upload did not complete. You can re-run it later:
+  echo          tools\coherence_schema\Run-CoherenceSchemaPipeline.bat
+  echo          Without a matching schema the game fails with SchemaNotFound.
+)
+goto :eof
 
 rem ------------------------------------------------------------
 rem  :patch_runtime_key
