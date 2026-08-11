@@ -2,6 +2,10 @@
 
 Custom modified Steam API .dll for Steam games to spoof your game as Spacewar. Drop-in replacement for `steam_api.dll` / `steam_api64.dll`.
 
+> **Does your game work?** Check the **[compatibility list →](https://uco2list.iforgor.cc)**
+> — what's confirmed, on which backend (Steam / EOS / Photon / coherence / …), and
+> how each build is fixed. It's community-maintained and grows as games are tested.
+
 ## Quick start — `patch.bat`
 
 **Drag your game folder onto `patch.bat`.** It works out what the game needs and
