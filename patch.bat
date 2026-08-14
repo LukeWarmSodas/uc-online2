@@ -271,6 +271,18 @@ if "%ENGINE%"=="Unity" (
   findstr /m /c:"PhotonUnityNetworking" "%GAME_EXE%" >nul 2>&1 && set "FLAVOR=Realtime"
 )
 
+rem Native SDKs shipped as standalone DLLs beside the exe (No Man's Sky and other
+rem games on their own engine): these are neither a Unity Managed assembly nor an
+rem Unreal OnlineSubsystem symbol, so every check above misses them. Probe the
+rem binaries dir directly. PartyWin / PlayFabMultiplayer are the PlayFab-Party
+rem multiplayer tell; Core/Services alone can be just analytics, but flag it either
+rem way (the plugin stays idle until you give it a TitleId).
+if defined STEAM_DIR (
+  if not defined HAS_PLAYFAB if exist "%STEAM_DIR%\PartyWin.dll" set "HAS_PLAYFAB=1"
+  if not defined HAS_PLAYFAB for %%F in ("%STEAM_DIR%\PlayFab*.dll") do set "HAS_PLAYFAB=1"
+  if not defined HAS_EOS for %%F in ("%STEAM_DIR%\EOSSDK*.dll") do set "HAS_EOS=1"
+)
+
 rem coherence: the SDK bakes a schema next to the game. That file is present
 rem in every coherence build regardless of engine version, which makes it a
 rem better marker than any symbol name.
