@@ -211,6 +211,44 @@ if not defined STEAM_DIR if not defined IS_32BIT (
 if defined STEAM_DIR echo Steam DLL:   %STEAM_DIR%
 
 rem ============================================================
+rem  Neutralize a competing Steam emulator that ships its own loader
+rem
+rem  Repacks (SKIDROW, etc.) often bundle SteamFix or OnlineFix: a tiny
+rem  winmm.dll (or version.dll / dxgi.dll) proxy the exe loads on startup,
+rem  which in turn loads *Fix64.dll and installs its OWN Steam emulation.
+rem  Drop UCOnline2's steam_api64.dll in beside that and two emulators fight
+rem  over the interfaces -- the game behaves as if the backend is broken
+rem  (looks exactly like a "missing export"). Rename the competing loader
+rem  aside (reversible, *.uco-disabled) so only UCOnline2 is live.
+rem ============================================================
+if defined STEAM_DIR (
+  set "COMPET="
+  if exist "%STEAM_DIR%SteamFix64.dll"  set "COMPET=SteamFix"
+  if exist "%STEAM_DIR%OnlineFix64.dll" set "COMPET=OnlineFix"
+  if defined COMPET (
+    echo.
+    echo [WARN] Competing emulator found in this folder: !COMPET!. It injects its
+    echo        own Steam through a winmm/version proxy and will fight UCOnline2.
+    echo        Disabling it ^(renamed to *.uco-disabled, reversible^):
+    rem Named fix files -- unambiguous, always disable.
+    for %%P in (winmm.dll winmm.txt winmm.ini SteamFix64.dll SteamFix.ini OnlineFix64.dll OnlineFix.ini dlllist.txt) do (
+      if exist "%STEAM_DIR%%%P" if not exist "%STEAM_DIR%%%P.uco-disabled" (
+        ren "%STEAM_DIR%%%P" "%%P.uco-disabled" && echo         - %%P
+      )
+    )
+    rem Generic proxy DLLs a fix MIGHT hide behind -- only disable when small,
+    rem so we never touch a legit large dll the game itself ships.
+    for %%P in (version.dll dxgi.dll dsound.dll winhttp.dll) do (
+      if exist "%STEAM_DIR%%%P" if not exist "%STEAM_DIR%%%P.uco-disabled" (
+        for %%Z in ("%STEAM_DIR%%%P") do if %%~zZ LSS 307200 (
+          ren "%STEAM_DIR%%%P" "%%P.uco-disabled" && echo         - %%P
+        )
+      )
+    )
+  )
+)
+
+rem ============================================================
 rem  Where union-crax.ini and plugins\ must live
 rem
 rem  NOT the game folder -- UCOnline2's ReadConfig builds the ini path from
