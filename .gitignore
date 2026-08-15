@@ -16,3 +16,6 @@ tools/*/debbuild/
 
 # Claude Code project state (auto-memory, settings)
 .claude/
+
+# Local scrapped work (reversible archive, never released)
+.backup/
