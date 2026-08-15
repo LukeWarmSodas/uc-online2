@@ -134,6 +134,20 @@ UnlockDLC=123,456,789 # Legacy DLC list; prefer the [DLC] section below
 EmulateTicket=true  # Enable ticket emulation using ogAppId or AppId
 ```
 
+Games that use Steam Datagram Relay may need UCO2 to create the real Steam
+networking context before switching back to the spoofed AppId:
+
+```ini
+[Settings]
+AppId=480
+ogAppId=<the game's real Steam AppId>
+SDR=yes
+```
+
+`SDR=yes` requires `ogAppId`. It uses the older `SteamClient017` connection path
+for compatibility, then exposes the current Steam interfaces to the game. Leave
+it disabled unless the game uses Steam Networking Sockets/SDR.
+
 ## Unlock DLC
 
 Games ask about DLC in two different ways, and both have to be answered:
