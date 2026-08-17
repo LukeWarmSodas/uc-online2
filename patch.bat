@@ -12,6 +12,8 @@ rem  It works out what the game is and does the whole deploy:
 rem    * finds the engine (Unity or Unreal) and the real executable
 rem    * finds where steam_api64.dll actually lives and installs ours THERE,
 rem      backing up the original first
+rem    * installs the early overlay proxy as version.dll for Unity or
+rem      XINPUT1_3.dll beside the real Unreal shipping executable
 rem    * detects Photon / EOS / PlayFab and copies the matching plugin
 rem    * writes a union-crax.ini with the right sections
 rem
@@ -48,6 +50,15 @@ if not defined EMU_DLL (
   echo        The ini and plugins will still be written; copy the DLL yourself.
   echo.
 )
+
+rem ---- locate the early overlay proxy ----
+rem One binary is renamed at deployment time. UnityPlayer imports version.dll;
+rem UE shipping executables commonly import XINPUT1_3.dll. The proxy inspects
+rem its deployed filename and forwards to the matching real system DLL.
+set "OVERLAY_PROXY="
+if exist "%SCRIPTDIR%plugins\steam_overlay\relbuild\x64\overlay_proxy.dll" set "OVERLAY_PROXY=%SCRIPTDIR%plugins\steam_overlay\relbuild\x64\overlay_proxy.dll"
+if not defined OVERLAY_PROXY if exist "%SCRIPTDIR%plugins\overlay_proxy.dll" set "OVERLAY_PROXY=%SCRIPTDIR%plugins\overlay_proxy.dll"
+if not defined OVERLAY_PROXY if exist "%SCRIPTDIR%overlay_proxy.dll" set "OVERLAY_PROXY=%SCRIPTDIR%overlay_proxy.dll"
 
 rem ---- key-only mode ----
 rem
@@ -505,6 +516,7 @@ set "INI=%INI_DIR%\union-crax.ini"
 >> "%INI%" echo ogAppId=%OGAPPID%
 >> "%INI%" echo PluginsFolder=plugins
 >> "%INI%" echo GetStubbedLol=false
+>> "%INI%" echo LogOverlay=no
 
 rem ============================================================
 rem  [DLC]
@@ -639,6 +651,8 @@ if errorlevel 1 (
 ) else (
   echo [OK] Installed UCOnline2 steam_api64.dll to %STEAM_DIR%
 )
+
+call :deploy_overlay_proxy
 
 rem ============================================================
 rem  Deploy plugins
@@ -861,6 +875,62 @@ if errorlevel 1 (
   echo [ERROR] Failed to copy %P%.dll
 ) else (
   echo [OK] Copied %P%.dll to %INI_DIR%\plugins\
+)
+goto :eof
+
+rem ------------------------------------------------------------
+rem  :deploy_overlay_proxy
+rem
+rem  Deploys the same renameable early-loader under the DLL name imported by
+rem  the detected engine. This gets GameOverlayRenderer64 into the process
+rem  before Unity or Unreal creates its graphics swapchain.
+rem ------------------------------------------------------------
+:deploy_overlay_proxy
+if not defined OVERLAY_PROXY (
+  echo [SKIP] Early overlay proxy not included in this build.
+  goto :eof
+)
+
+set "OVERLAY_TARGET="
+set "OVERLAY_NAME="
+if /i "%ENGINE%"=="Unity" (
+  set "OVERLAY_NAME=version.dll"
+  set "OVERLAY_TARGET=%INI_DIR%\version.dll"
+)
+if /i "%ENGINE%"=="Unreal" (
+  set "OVERLAY_NAME=XINPUT1_3.dll"
+  for %%F in ("%GAME_EXE%") do set "OVERLAY_TARGET=%%~dpFXINPUT1_3.dll"
+)
+if not defined OVERLAY_TARGET (
+  echo [SKIP] No early overlay proxy rule for %ENGINE% games.
+  goto :eof
+)
+
+if exist "%OVERLAY_TARGET%" (
+  fc /b "%OVERLAY_PROXY%" "%OVERLAY_TARGET%" >nul 2>&1
+  if not errorlevel 1 (
+    echo [OK] Overlay proxy already installed as %OVERLAY_NAME%.
+    goto :eof
+  )
+  if exist "%OVERLAY_TARGET%.uco2.bak" (
+    echo [SKIP] Existing %OVERLAY_NAME% differs and its backup already exists.
+    echo        Refusing to replace it again: %OVERLAY_TARGET%
+    goto :eof
+  )
+  copy /y "%OVERLAY_TARGET%" "%OVERLAY_TARGET%.uco2.bak" >nul
+  if errorlevel 1 (
+    echo [ERROR] Could not back up existing %OVERLAY_NAME%; overlay proxy skipped.
+    goto :eof
+  )
+  echo [OK] Backed up existing %OVERLAY_NAME% to %OVERLAY_NAME%.uco2.bak
+)
+
+copy /y "%OVERLAY_PROXY%" "%OVERLAY_TARGET%" >nul
+if errorlevel 1 (
+  echo [ERROR] Failed to install overlay proxy as %OVERLAY_NAME% -- is the game running?
+) else (
+  echo [OK] Installed early overlay proxy as %OVERLAY_NAME%
+  echo      %OVERLAY_TARGET%
 )
 goto :eof
 

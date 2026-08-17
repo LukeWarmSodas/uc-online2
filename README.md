@@ -16,6 +16,8 @@ It will:
 - find the engine (Unity or Unreal) and the game's real executable
 - find where `steam_api64.dll` actually lives and install ours **there**, backing
   up the original to `.bak` first
+- deploy the early Steam overlay proxy as `version.dll` for Unity or
+  `XINPUT1_3.dll` beside the real Unreal shipping executable
 - write `union-crax.ini` next to the **running exe** — for Unreal that is not the
   game folder, and an ini in the wrong place is silently ignored
 - detect **Photon**, **EOS**, **PlayFab** and **coherence**, copy the matching
@@ -130,6 +132,7 @@ AppId=480
 ogAppId=220 # Half-life 2
 PluginsFolder=plugins
 GetStubbedLol=false
+LogOverlay=no
 UnlockDLC=123,456,789 # Legacy DLC list; prefer the [DLC] section below
 EmulateTicket=true  # Enable ticket emulation using ogAppId or AppId
 ```

@@ -57,7 +57,8 @@ jobs:
             "relbuild/x86/steam_api.dll",
             "relbuild/x64/steam_api64.dll",
             "debbuild/x86/steam_api.dll",
-            "debbuild/x64/steam_api64.dll"
+            "debbuild/x64/steam_api64.dll",
+            "plugins/steam_overlay/relbuild/x64/overlay_proxy.dll"
           )
 
           foreach ($file in $files) {
