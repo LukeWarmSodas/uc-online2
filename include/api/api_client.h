@@ -562,7 +562,7 @@ S_API bool S_CALLTYPE SteamAPI_InitSafe()
 
 S_API bool S_CALLTYPE SteamAPI_IsSteamRunning()
 {
-	UCOLOG("[UCOnline2] SteamAPI_IsSteamRunning");
+	UCOLOG_HOT("[UCOnline2] SteamAPI_IsSteamRunning");
 
 	DWORD ActiveProcessPID = 0;
 	LSTATUS GetPID = GetRegistryDWORD("Software\\Valve\\Steam\\ActiveProcess", "pid", ActiveProcessPID);
