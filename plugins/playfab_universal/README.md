@@ -40,6 +40,33 @@ WinHTTP hooking does **not** reach Unity's own traffic. `UnityPlayer.dll` only i
 
 ## Setup
 
+### No Man's Sky (AppId 275850) — quickstart
+
+Full Steam↔Steam co-op works. NMS is a **native** (non-Mono) PlayFab game, so modules 3 + 5 carry it: the WinHTTP host-rewrite plus the libHttpClient `LoginWithSteam → LoginWithCustomID` swap (the login body is set via a streaming read-function, which the plugin hooks). No `Gate*` keys needed.
+
+> **Both players must be on the SAME PlayFab title.** NMS brokers the co-op session through PlayFab (Party), so two people on *different* titles can't find each other. Pick one:
+>
+> - **Play with anyone — use the shared community title `1D861F`.** It has `LoginWithCustomID` enabled and is open for exactly this. Everyone who sets `TitleId=1D861F` lands in the same pool and can connect with each other — no PlayFab account needed.
+> - **Private group:** make your own title (step 1 below) and have everyone in your group use *that* ID.
+
+```ini
+[Settings]
+AppId=480
+ogAppId=275850
+PluginsFolder=plugins
+GetStubbedLol=false
+; leave SDR unset/no — the SDR split-context needs a real 275850 license and
+; will fail SteamAPI_Init for accounts that don't own the game.
+
+[PlayFab]
+TitleId=1D861F
+```
+
+Also needed:
+- **UCOnline2 ≥ v1.19.3** — it includes the `SteamNetworkingSockets` **AcceptConnection** fix that the co-op P2P transport relies on.
+- Launch the **unpacked** exe (the packed one trips SteamStub / wants admin), with **real Steam running** (UCOnline2 is a passthrough).
+- The failing `merged-nms-auth.nomanssky.com` calls in the background are fine — that's HG cloud features (saves / discoveries / bases), **not** co-op.
+
 ### 1. Create your PlayFab title
 
 1. Sign up at [playfab.com](https://playfab.com) (free tier is plenty) and create a **title** — you get a short ID like `A1B2C`.
