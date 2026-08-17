@@ -153,6 +153,8 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-beta') }}
+          make_latest: ${{ contains(github.ref_name, '-beta') && 'false' || 'true' }}
           files: |
             dist/uc-online2-${{ github.ref_name }}-release.zip
             dist/uc-online2-${{ github.ref_name }}-debug.zip
