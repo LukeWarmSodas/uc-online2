@@ -35,10 +35,10 @@ wrong and you need to know what it was trying to do.
 
 | Game | Steam AppId | SDK | Notes |
 |---|---|---|---|
-| **Vampire Survivors** 1.15.114 | 1794680 | coherence 1.6 (IL2CPP) | Lobby created on our own coherence project, 2026-08-09. |
-| **Vampire Survivors** build 23591499 | 1794680 | coherence 1.6 (IL2CPP) | Same key, **different schema** — a game update changes the schema and leaves the runtime key alone. |
+| **Vampire Survivors** (v1.15.114 / build 23591499) | 1794680 | coherence 1.6 (IL2CPP) | Lobby created on our own project, 2026-08-09. Each build has its **own schema** but the **same runtime key** — a game update changes the schema and leaves the key alone, so both builds live on one project. |
+| **Lost Skies** (build 23704476) | 1931180 | coherence (IL2CPP) | **Hosting** confirmed 2026-08-10; joining untested (needs 2 players). Uses coherence **RSL** — a host-local replication server + a **Steam lobby** for discovery, **not** Cloud rooms — so an empty coherence dashboard is expected, not a failure. |
 
-Both need the runtime key patched into the game data, which `patch.bat` does.
+All need the runtime key patched into the game data, which `patch.bat` does.
 
 ## The wall
 
@@ -166,29 +166,31 @@ replaced wholesale when the game is updated.
 
 ## Shared project (no setup)
 
-If you would rather not stand up your own project, a shared one is available for
-**Vampire Survivors** — the schema is already uploaded and all regions are
-enabled, so it works out of the box:
+If you would rather not stand up your own project, a shared one is available with
+several games' schemas already uploaded and all regions enabled, so it works out
+of the box:
 
 ```
 runtime key: fce1ea692a854b50b9f945ef6aa17758
 ```
 
-Patch that into `VampireSurvivors_Data/globalgamemanagers.assets` in place of the
+Patch that into the game's `globalgamemanagers.assets` in place of the
 32-character key already there (see below) — or just answer `SHARED` when
 `patch.bat` asks for a runtime key, and it does this for you.
 
 Schemas currently uploaded to it:
 
-| Build | Schema |
-|---|---|
-| 1.15.114 | `34701e1e7101dd9c6d0b5379d57936799ce0dc1c` |
-| 23591499 | `64649e4d63da323108ba010763b14bed03a075ae` |
+| Game | Build | Schema |
+|---|---|---|
+| Vampire Survivors | 1.15.114 | `34701e1e7101dd9c6d0b5379d57936799ce0dc1c` |
+| Vampire Survivors | 23591499 | `64649e4d63da323108ba010763b14bed03a075ae` |
+| Lost Skies | 23704476 | `98c835cdaa3e32a506730c3a438135de1007d56f` |
 
-A coherence project holds several schemas at once, so one key covers multiple
-game builds. A build whose schema is not listed will authenticate and then fail
-with `SchemaNotFound` — the runtime key and the schema are separate things, and
-a game update changes the schema while leaving the key alone.
+A coherence project holds several schemas at once, so **one key covers many games
+and many builds** — add a game by uploading its schema, no new project needed. A
+build whose schema is not listed will authenticate and then fail with
+`SchemaNotFound` — the runtime key and the schema are separate things, and a game
+update changes the schema while leaving the key alone.
 
 **Availability is not guaranteed.** It runs on a free coherence tier, it is not
 monitored, and it may be rate-limited, rotated or taken down at any time without
@@ -222,6 +224,38 @@ covers steps 2 and 3 below. The list is what it is doing on your behalf.
 
 Note `activeSchemas` comes from `ProjectSettings.instance.activeSchemas`, *not*
 `RuntimeSettings.schemas` — editing the latter has no effect on the upload.
+
+### When the game does not ship `combined.schema`
+
+Many coherence games (e.g. Lost Skies) do **not** drop a loose
+`combined.schema` — the schema is baked into
+`<Game>_Data/globalgamemanagers.assets` instead. Recover it first:
+
+```powershell
+tools\coherence_schema\Extract-CoherenceSchema.ps1 "C:\path\to\game"
+```
+
+That writes `combined.schema`, `Toolkit.schema` and `Gathered.schema` next to the
+assets file. It is **self-validating**: each schema's bytes are checked against
+the sha1 id stored beside it, and the reconstructed combined is checked against
+the id the client will actually request (also baked into the file). If it prints
+`MATCH`, upload with confidence; if it warns, the schema set for that game
+differs and needs a look before uploading. Then feed the pipeline both files:
+
+```powershell
+tools\coherence_schema\Invoke-CoherenceSchemaPipeline.ps1 -ProjectPath <unity project> `
+    -CombinedSchemaPath <out>\combined.schema `
+    -ToolkitSchemaPath  <out>\Toolkit.schema
+```
+
+**How it works.** Each baked schema is a coherence `SchemaDefinition`:
+`[len][text][name][len][sha1 id][components…]`. Because the stored id is
+`sha1(text)`, a wrong extraction can't hide. The combined id the client requests
+is `sha1( lf(Toolkit) + "\n" + Gathered )` — the authored `Toolkit.schema` is
+CRLF, `Gathered.schema` is LF, and the bake normalises Toolkit to LF before
+hashing. Don't hand-carve the text out with a hex editor: reading from the first
+`component` line to "the end" overshoots into the next serialized field and
+produces a schema that uploads clean but is silently rejected server-side.
 
 ## Local mode
 

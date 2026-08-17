@@ -27,6 +27,8 @@ S_API ISteamClient* g_pSteamClientGameServer = nullptr;
 #include "include/dump_handler.h"
 #include "include/MinHook.h"
 
+void InstallEarlyAppIdHook(ISteamUtils* pUtils);
+
 #include "include/api/api_callbacks.h"
 #include "include/api/api_client.h"
 #include "include/api/api_interfaces.h"
@@ -88,6 +90,7 @@ bool g_bHaveInstallPath = false;
 SRWLOCK g_CallbackLock;
 uint32 g_ForcedAppId = 480;
 uint32 g_OriginalAppId = 0;
+uint32 g_SteamNetworkingAppId = 0;
 // [Settings] EmulateTicket -- also gates auth-session-ticket emulation
 // (see the ISteamUser hooks further down).
 static bool g_bEmulateAuthTicket = false;
@@ -477,6 +480,12 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 		s_PluginLoader.ReadConfig();
 		g_ForcedAppId = s_PluginLoader.GetAppId();
 		g_OriginalAppId = s_PluginLoader.GetOgAppId();
+		if (s_PluginLoader.GetSDREnabled())
+		{
+			g_SteamNetworkingAppId = g_OriginalAppId;
+			if (g_SteamNetworkingAppId == 0)
+				UCOLOG("[UCOnline2] SDR=yes ignored: ogAppId is required");
+		}
 
 		SetAppIDEnv();
 		WriteAppIDFile();
@@ -808,39 +817,40 @@ bool CCallbackDispatcher::FreeManualSynthetic()
 	return true;
 }
 
-// Find the one registered callback that should receive this id and run it.
-// Extracted from DispatchFrame so real and synthetic delivery cannot drift
-// apart. The caller must already hold m_MapLock.
+// Deliver one callback while holding m_MapLock. Most callback types retain the
+// historical first-registration behavior. Some games register a new scoped
+// networking handler when a host or join operation begins while older managed
+// wrappers remain registered. The newest 1221 handler owns the active operation.
 bool CCallbackDispatcher::DispatchToTarget(int iCallback, void* pvData, uint32 cubData,
                                            HSteamUser user, bool bServer)
 {
-	CCallbackBase* pTarget = nullptr;
-	bool bServerCb = false;
-
-	for (auto it = m_CallbackMap.begin(); it != m_CallbackMap.end(); ++it)
+	CCallbackBase* target = nullptr;
+	const bool preferNewest = iCallback ==
+		SteamNetConnectionStatusChangedCallback_t::k_iCallback;
+	auto range = m_CallbackMap.equal_range(iCallback);
+	for (auto it = range.first; it != range.second; ++it)
 	{
 		CCallbackBase* pCb = it->second;
 		if (!pCb)
 			continue;
 
-		if (it->first == iCallback && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsRegistered))
+		const bool registered =
+			(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsRegistered) != 0;
+		const bool gameServer =
+			(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) != 0;
+		if (registered && ((bServer && gameServer && user == g_ServerUser) ||
+			(!bServer && !gameServer && user == g_ClientUser)))
 		{
-			if (user == g_ServerUser && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && bServer)
-			{
-				pTarget = pCb; bServerCb = true; break;
-			}
-			else if (user == g_ClientUser && !(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && !bServer)
-			{
-				pTarget = pCb; bServerCb = false; break;
-			}
+			if (!target || preferNewest)
+				target = pCb;
 		}
 	}
 
-	if (!pTarget)
+	if (!target)
 		return false;
 
-	(void)bServerCb;
-	pTarget->Run(pvData);
+	target->Run(pvData);
+
 	return true;
 }
 
@@ -923,58 +933,21 @@ void CCallbackDispatcher::DispatchFrame(HSteamPipe hPipe, bool bServer)
 	}
 	else
 	{
-		CCallbackBase* pTarget = nullptr;
-		bool bServerCb = false;
-
-		for (auto it = m_CallbackMap.begin(); it != m_CallbackMap.end(); ++it)
+		bool bSkip = false;
+		if (!bServer)
 		{
-			CCallbackBase* pCb = it->second;
-			if (!pCb)
-				continue;
-
-			if (it->first == msg.m_iCallback && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsRegistered))
+			if (msg.m_iCallback == HTML_NeedsPaint_t::k_iCallback &&
+				msg.m_cubParam == sizeof(HTML_NeedsPaint_t))
 			{
-				if (msg.m_hSteamUser == g_ServerUser && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && bServer)
-				{
-					pTarget = pCb;
-					bServerCb = true;
-					break;
-				}
-				else if (msg.m_hSteamUser == g_ClientUser && !(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && !bServer)
-				{
-					pTarget = pCb;
-					bServerCb = false;
-					break;
-				}
+				HTML_NeedsPaint_t* pPaint = (HTML_NeedsPaint_t*)msg.m_pubParam;
+				bSkip = pPaint->unWide == 1 || pPaint->unTall == 1;
 			}
+			RunCallbackPatchers(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
 		}
 
-		if (pTarget)
-		{
-			if (bServerCb)
-			{
-				UCOLOG_HOT("[UCOnline2] Server callback -> %d flags=%d\r\n", msg.m_iCallback, pTarget->m_nCallbackFlags);
-				pTarget->Run(msg.m_pubParam);
-			}
-			else
-			{
-				UCOLOG_HOT("[UCOnline2] Client callback -> %d flags=%d\r\n", msg.m_iCallback, pTarget->m_nCallbackFlags);
-
-				bool bSkip = false;
-
-				if (msg.m_iCallback == HTML_NeedsPaint_t::k_iCallback && msg.m_cubParam == sizeof(HTML_NeedsPaint_t))
-				{
-					HTML_NeedsPaint_t* pPaint = (HTML_NeedsPaint_t*)msg.m_pubParam;
-					if (pPaint->unWide == 1 || pPaint->unTall == 1)
-						bSkip = true;
-				}
-
-				RunCallbackPatchers(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
-
-				if (!bSkip)
-					pTarget->Run(msg.m_pubParam);
-			}
-		}
+		if (!bSkip)
+			DispatchToTarget(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam,
+				msg.m_hSteamUser, bServer);
 	}
 
 	UCOLOG_HOT("[UCOnline2] Freeing callback -> %d\r\n", msg.m_iCallback);
@@ -1032,46 +1005,10 @@ void CCallbackDispatcher::DispatchFrameSafe(HSteamPipe hPipe, bool bServer)
 		}
 		else
 		{
-			CCallbackBase* pTarget = nullptr;
-			bool bServerCb = false;
-
-			for (auto it = m_CallbackMap.begin(); it != m_CallbackMap.end(); ++it)
-			{
-				CCallbackBase* pCb = it->second;
-				if (!pCb)
-					continue;
-
-				if (it->first == msg.m_iCallback && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsRegistered))
-				{
-					if (msg.m_hSteamUser == g_ServerUser && (pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && bServer)
-					{
-						pTarget = pCb;
-						bServerCb = true;
-						break;
-					}
-					else if (msg.m_hSteamUser == g_ClientUser && !(pCb->m_nCallbackFlags & pCb->k_ECallbackFlagsGameServer) && !bServer)
-					{
-						pTarget = pCb;
-						bServerCb = false;
-						break;
-					}
-				}
-			}
-
-			if (pTarget)
-			{
-				if (bServerCb)
-				{
-					UCOLOG_HOT("[UCOnline2] Server callback (safe) -> %d flags=%d\r\n", msg.m_iCallback, pTarget->m_nCallbackFlags);
-					pTarget->Run(msg.m_pubParam);
-				}
-				else
-				{
-					UCOLOG_HOT("[UCOnline2] Client callback (safe) -> %d flags=%d\r\n", msg.m_iCallback, pTarget->m_nCallbackFlags);
-					RunCallbackPatchers(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
-					pTarget->Run(msg.m_pubParam);
-				}
-			}
+			if (!bServer)
+				RunCallbackPatchers(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam);
+			DispatchToTarget(msg.m_iCallback, msg.m_pubParam, msg.m_cubParam,
+				msg.m_hSteamUser, bServer);
 		}
 
 		bDispatched = true;
@@ -1438,6 +1375,7 @@ typedef bool   (S_CALLTYPE *Fn_BGetDLCDataByIndex)(void* pThis, int iDLC, AppId_
                                                    bool* pbAvailable, char* pchName, int cchName);
 
 static Fn_GetAppID            g_pfnOriginalGetAppID           = nullptr;
+static void*                  g_pHookedGetAppIDTarget          = nullptr;
 static Fn_BIsSubscribedApp    g_pfnOriginalBIsSubscribedApp   = nullptr;
 static Fn_BIsDlcInstalled     g_pfnOriginalBIsDlcInstalled    = nullptr;
 static Fn_GetEarliestPurchase g_pfnOriginalGetEarliestPurchase = nullptr;
@@ -1544,6 +1482,38 @@ static uint32 S_CALLTYPE Hooked_GetAppID(void* pThis)
         g_bGetAppIDLoggedFirst = true;
     }
     return g_OriginalAppId;
+}
+
+void InstallEarlyAppIdHook(ISteamUtils* pUtils)
+{
+    if (!pUtils || g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
+        return;
+
+    void** utilsVT = *reinterpret_cast<void***>(pUtils);
+    void* target = utilsVT[9];
+    if (g_pHookedGetAppIDTarget == target && g_pfnOriginalGetAppID)
+        return;
+
+    MH_Initialize();
+    MH_STATUS status = MH_CreateHook(target, &Hooked_GetAppID,
+        reinterpret_cast<void**>(&g_pfnOriginalGetAppID));
+    if (status != MH_OK)
+    {
+        UCOLOG("[UCOnline2] MH_CreateHook failed for early GetAppID: %d", status);
+        return;
+    }
+
+    status = MH_EnableHook(target);
+    if (status == MH_OK || status == MH_ERROR_ENABLED)
+    {
+        g_pHookedGetAppIDTarget = target;
+        UCOLOG("[UCOnline2] GetAppID hook installed early (will return %u)",
+            g_OriginalAppId);
+    }
+    else
+    {
+        UCOLOG("[UCOnline2] MH_EnableHook failed for early GetAppID: %d", status);
+    }
 }
 
 
@@ -2150,24 +2120,8 @@ void InstallSteamSpoofHooks()
     //   2:GetConnectedUniverse  3:GetServerRealTime  4:GetIPCountry
     //   5:GetImageSize  6:GetImageRGBA  7:GetCSERIPPort (private but
     //   present in vtable)  8:GetCurrentBatteryPower  9:GetAppID
-    if (bSpoofAppId && g_ClientCtx.SteamUtils())
-    {
-        void** utilsVT = *reinterpret_cast<void***>(g_ClientCtx.SteamUtils());
-        void* pGetAppIDFn = utilsVT[9];
-        MH_STATUS s = MH_CreateHook(pGetAppIDFn, &Hooked_GetAppID,
-            reinterpret_cast<void**>(&g_pfnOriginalGetAppID));
-        if (s == MH_OK)
-        {
-            if (MH_EnableHook(pGetAppIDFn) == MH_OK)
-                UCOLOG("[UCOnline2] GetAppID hook installed (will return %u)", g_OriginalAppId);
-            else
-                UCOLOG("[UCOnline2] MH_EnableHook failed for GetAppID");
-        }
-        else
-        {
-            UCOLOG("[UCOnline2] MH_CreateHook failed for GetAppID: %d", s);
-        }
-    }
+    if (bSpoofAppId)
+        InstallEarlyAppIdHook(g_ClientCtx.SteamUtils());
 
     // ISteamApps vtable, in declaration order from include/sdk/isteamapps.h.
     // Hooking by index is safe here because WE pin the interface version:

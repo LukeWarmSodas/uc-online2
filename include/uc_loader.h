@@ -137,6 +137,14 @@ uint32 GetOgAppId()
   		return id;
   	}
 
+	bool GetSDREnabled()
+	{
+		if (m_IniPath[0] == '\0')
+			return false;
+
+		return IniReadBool("SDR", false);
+	}
+
 	std::vector<uint32> GetUnlockDLCAppIds()
 	{
 		std::vector<uint32> appIds;

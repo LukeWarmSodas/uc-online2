@@ -89,7 +89,13 @@ set "ENGINE="
 set "DATA="
 set "GAME_EXE="
 
-for /d %%D in ("%GAME%\*_Data") do set "DATA=%%~fD"
+rem Matching "*_Data" alone is not enough: Farming Simulator ships a "web_data"
+rem folder, which matched and made this declare a Unity game that then failed
+rem for having no Managed\ or il2cpp_data\. Require the actual Unity marker.
+for /d %%D in ("%GAME%\*_Data") do (
+  if exist "%%~fD\Managed\" set "DATA=%%~fD"
+  if exist "%%~fD\il2cpp_data\" set "DATA=%%~fD"
+)
 
 rem Some repacks nest the game one level down and put a loader at the top --
 rem gbe's ColdClientLoader does exactly this ("Vampire Survivors.exe" beside a
@@ -97,7 +103,10 @@ rem "Vampire Survivors\" folder holding the real game). Only checking the top
 rem level makes patch.bat report "could not identify the engine" for a perfectly
 rem ordinary Unity game, so fall back to a recursive search.
 if not defined DATA (
-  for /d /r "%GAME%" %%D in (*_Data) do if not defined DATA set "DATA=%%~fD"
+  for /d /r "%GAME%" %%D in (*_Data) do if not defined DATA (
+    if exist "%%~fD\Managed\" set "DATA=%%~fD"
+    if exist "%%~fD\il2cpp_data\" set "DATA=%%~fD"
+  )
 )
 if defined DATA set "ENGINE=Unity"
 
@@ -112,10 +121,18 @@ if not defined ENGINE (
   if defined GAME_EXE set "ENGINE=Unreal"
 )
 
+rem Plenty of games are neither Unity nor Unreal -- Farming Simulator has its
+rem own engine. There is still exactly one thing that matters: where
+rem steam_api64.dll lives and which exe loads it, so fall back to that rather
+rem than refusing to help.
 if not defined ENGINE (
-  echo [ERROR] Could not identify the engine.
-  echo   Looked for a "<Game>_Data" folder ^(Unity^) and a
-  echo   "*-Win64-Shipping.exe" ^(Unreal^) and found neither.
+  for /r "%GAME%" %%F in (steam_api64.dll) do if exist "%%~fF" set "ENGINE=Generic"
+)
+
+if not defined ENGINE (
+  echo [ERROR] Could not identify the game.
+  echo   Looked for a "<Game>_Data" folder ^(Unity^), a "*-Win64-Shipping.exe"
+  echo   ^(Unreal^) and any steam_api64.dll, and found none of them.
   goto :end
 )
 
@@ -149,9 +166,26 @@ rem filename (no wildcard) does NOT test for the file -- it yields that name
 rem joined to EVERY directory it walks, so the first result is always the
 rem search root. Without the guard this picked the game folder itself and
 rem installed the emulator where nothing loads it.
+rem Some games ship steam_api64.dll more than once -- Farming Simulator has an
+rem identical copy at the root and in x64\, and only the one beside the real
+rem binary is loaded. Taking the first hit picked the root and patched a file
+rem nothing reads, so choose the copy sitting next to the BIGGEST executable:
+rem the launcher and the dedicated server are a fraction of the game's size.
 set "STEAM_DIR="
+set "STEAM_BEST=0"
 for /r "%GAME%" %%F in (steam_api64.dll) do (
-  if exist "%%~fF" if not defined STEAM_DIR set "STEAM_DIR=%%~dpF"
+  if exist "%%~fF" (
+    set "CAND_DIR=%%~dpF"
+    set "CAND_MAX=0"
+    for %%E in ("%%~dpF*.exe") do (
+      if %%~zE GTR !CAND_MAX! set "CAND_MAX=%%~zE"
+    )
+    if !CAND_MAX! GTR !STEAM_BEST! (
+      set "STEAM_BEST=!CAND_MAX!"
+      set "STEAM_DIR=!CAND_DIR!"
+    )
+    if not defined STEAM_DIR set "STEAM_DIR=!CAND_DIR!"
+  )
 )
 
 rem A 32-bit game ships steam_api.dll and no steam_api64.dll. Installing our
@@ -177,6 +211,44 @@ if not defined STEAM_DIR if not defined IS_32BIT (
 if defined STEAM_DIR echo Steam DLL:   %STEAM_DIR%
 
 rem ============================================================
+rem  Neutralize a competing Steam emulator that ships its own loader
+rem
+rem  Repacks (SKIDROW, etc.) often bundle SteamFix or OnlineFix: a tiny
+rem  winmm.dll (or version.dll / dxgi.dll) proxy the exe loads on startup,
+rem  which in turn loads *Fix64.dll and installs its OWN Steam emulation.
+rem  Drop UCOnline2's steam_api64.dll in beside that and two emulators fight
+rem  over the interfaces -- the game behaves as if the backend is broken
+rem  (looks exactly like a "missing export"). Rename the competing loader
+rem  aside (reversible, *.uco-disabled) so only UCOnline2 is live.
+rem ============================================================
+if defined STEAM_DIR (
+  set "COMPET="
+  if exist "%STEAM_DIR%SteamFix64.dll"  set "COMPET=SteamFix"
+  if exist "%STEAM_DIR%OnlineFix64.dll" set "COMPET=OnlineFix"
+  if defined COMPET (
+    echo.
+    echo [WARN] Competing emulator found in this folder: !COMPET!. It injects its
+    echo        own Steam through a winmm/version proxy and will fight UCOnline2.
+    echo        Disabling it ^(renamed to *.uco-disabled, reversible^):
+    rem Named fix files -- unambiguous, always disable.
+    for %%P in (winmm.dll winmm.txt winmm.ini SteamFix64.dll SteamFix.ini OnlineFix64.dll OnlineFix.ini dlllist.txt) do (
+      if exist "%STEAM_DIR%%%P" if not exist "%STEAM_DIR%%%P.uco-disabled" (
+        ren "%STEAM_DIR%%%P" "%%P.uco-disabled" && echo         - %%P
+      )
+    )
+    rem Generic proxy DLLs a fix MIGHT hide behind -- only disable when small,
+    rem so we never touch a legit large dll the game itself ships.
+    for %%P in (version.dll dxgi.dll dsound.dll winhttp.dll) do (
+      if exist "%STEAM_DIR%%%P" if not exist "%STEAM_DIR%%%P.uco-disabled" (
+        for %%Z in ("%STEAM_DIR%%%P") do if %%~zZ LSS 307200 (
+          ren "%STEAM_DIR%%%P" "%%P.uco-disabled" && echo         - %%P
+        )
+      )
+    )
+  )
+)
+
+rem ============================================================
 rem  Where union-crax.ini and plugins\ must live
 rem
 rem  NOT the game folder -- UCOnline2's ReadConfig builds the ini path from
@@ -191,6 +263,9 @@ rem For Unity the exe sits beside <Game>_Data, which is NOT necessarily the
 rem folder that was dropped on this script -- see the nested-layout note above.
 set "INI_DIR=%GAME%"
 if "%ENGINE%"=="Unity"  for %%F in ("%DATA%") do set "INI_DIR=%%~dpF"
+rem Generic: the emulator reads its ini from the running exe's directory, and
+rem that is the folder we just picked for steam_api64.dll.
+if "%ENGINE%"=="Generic" if defined STEAM_DIR set "INI_DIR=%STEAM_DIR%"
 if "%ENGINE%"=="Unreal" for %%F in ("%GAME_EXE%") do set "INI_DIR=%%~dpF"
 if "%INI_DIR:~-1%"=="\" set "INI_DIR=%INI_DIR:~0,-1%"
 echo Config dir:  %INI_DIR%
@@ -227,11 +302,23 @@ if "%ENGINE%"=="Unity" (
     goto :end
   )
 ) else (
-  set "BACKEND=Unreal"
+  set "BACKEND=%ENGINE%"
   rem ANSI module names -- see the DETECTION NOTE at the top.
   findstr /m /c:"OnlineSubsystemEOS" "%GAME_EXE%" >nul 2>&1 && set "HAS_EOS=1"
   findstr /m /c:"OnlineSubsystemPlayFab" "%GAME_EXE%" >nul 2>&1 && set "HAS_PLAYFAB=1"
   findstr /m /c:"PhotonUnityNetworking" "%GAME_EXE%" >nul 2>&1 && set "FLAVOR=Realtime"
+)
+
+rem Native SDKs shipped as standalone DLLs beside the exe (No Man's Sky and other
+rem games on their own engine): these are neither a Unity Managed assembly nor an
+rem Unreal OnlineSubsystem symbol, so every check above misses them. Probe the
+rem binaries dir directly. PartyWin / PlayFabMultiplayer are the PlayFab-Party
+rem multiplayer tell; Core/Services alone can be just analytics, but flag it either
+rem way (the plugin stays idle until you give it a TitleId).
+if defined STEAM_DIR (
+  if not defined HAS_PLAYFAB if exist "%STEAM_DIR%\PartyWin.dll" set "HAS_PLAYFAB=1"
+  if not defined HAS_PLAYFAB for %%F in ("%STEAM_DIR%\PlayFab*.dll") do set "HAS_PLAYFAB=1"
+  if not defined HAS_EOS for %%F in ("%STEAM_DIR%\EOSSDK*.dll") do set "HAS_EOS=1"
 )
 
 rem coherence: the SDK bakes a schema next to the game. That file is present
@@ -240,6 +327,19 @@ rem better marker than any symbol name.
 set "HAS_COHERENCE="
 for /r "%GAME%" %%F in (combined.schema) do (
   if exist "%%~fF" set "HAS_COHERENCE=1"
+)
+
+rem combined.schema is NOT always on disk. Lost Skies is a coherence game with
+rem no such file -- the schema is embedded in the build instead (coherence can
+rem carry it in RuntimeSettings.CombinedSchemaText). Detecting only by that file
+rem reported "no secondary backend" for a game that plainly uses coherence, so
+rem fall back to the SDK's own types: a Mono build ships Coherence.Toolkit.dll,
+rem and an IL2CPP build leaves CoherenceBridge in global-metadata.dat.
+if not defined HAS_COHERENCE if defined DATA (
+  if exist "%DATA%\Managed\Coherence.Toolkit.dll" set "HAS_COHERENCE=1"
+  if not defined HAS_COHERENCE if exist "%DATA%\il2cpp_data\Metadata\global-metadata.dat" (
+    findstr /m /c:"CoherenceBridge" "%DATA%\il2cpp_data\Metadata\global-metadata.dat" >nul 2>&1 && set "HAS_COHERENCE=1"
+  )
 )
 
 rem File presence beats any string scan -- if the SDK ships, it is in use.
@@ -466,7 +566,7 @@ if not defined DLC_FOUND (
 
 if not defined DLC_FOUND (
   echo [INFO] No DLC ids found. UnlockAll still answers ownership checks; add
-  echo        "^<appid^>=^<name^>" lines under [DLC] if a DLC menu comes up empty.
+  echo        "appid=name" lines under [DLC] if a DLC menu comes up empty.
 )
 echo [INFO] DLC: UnlockAll=true is set, which is enough for most games. The id
 echo        list is only needed by games that ENUMERATE their DLC, and the two

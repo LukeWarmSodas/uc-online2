@@ -10,6 +10,10 @@ Custom modified Steam API .dll for Steam games to spoof your game as Spacewar. D
 > install behaves exactly like `main`. Details:
 > [Beta: replaying a real owned ticket](#beta-replaying-a-real-owned-ticket).
 
+> **Does your game work?** Check the **[compatibility list →](https://uco2list.iforgor.cc)**
+> — what's confirmed, on which backend (Steam / EOS / Photon / coherence / …), and
+> how each build is fixed. It's community-maintained and grows as games are tested.
+
 ## Quick start — `patch.bat`
 
 **Drag your game folder onto `patch.bat`.** It works out what the game needs and
@@ -137,6 +141,20 @@ GetStubbedLol=false
 UnlockDLC=123,456,789 # Legacy DLC list; prefer the [DLC] section below
 EmulateTicket=true  # Enable ticket emulation using ogAppId or AppId
 ```
+
+Games that use Steam Datagram Relay may need UCO2 to create the real Steam
+networking context before switching back to the spoofed AppId:
+
+```ini
+[Settings]
+AppId=480
+ogAppId=<the game's real Steam AppId>
+SDR=yes
+```
+
+`SDR=yes` requires `ogAppId`. It uses the older `SteamClient017` connection path
+for compatibility, then exposes the current Steam interfaces to the game. Leave
+it disabled unless the game uses Steam Networking Sockets/SDR.
 
 ## Unlock DLC
 

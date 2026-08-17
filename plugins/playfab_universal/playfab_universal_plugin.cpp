@@ -52,6 +52,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <wchar.h>
+#include <set>
 
 #include "../../include/MinHook.h"
 #include "../../include/uco_plugin.h"
@@ -312,9 +313,243 @@ static void ApplyGate()
 static volatile LONG g_LoginHookDone   = 0;
 static volatile LONG g_WinHttpHookDone = 0;
 
+// ------------------------------------------------------------
+// MODULE 5: native libHttpClient login rewrite (No Man's Sky etc.)
+//
+// Native PlayFab games use the C SDK over libHttpClient, so the Mono login swap
+// (Module 2) never runs for them. The host rewrite (Module 3) sends their calls
+// to our title, but LoginWithSteam there still fails -- our title cannot validate
+// a Steam ticket minted under the 480 spoof. So do the SAME swap at the
+// libHttpClient layer: when a call's URL is a platform login, rewrite the
+// endpoint to LoginWithCustomID and replace the ticket body with a CustomId body.
+// Host is left alone -- Module 3 rewrites it at connect time.
+//
+// libHttpClient.Win32.dll exports HCHttpCallRequestSetUrl and
+// HCHttpCallRequestSetRequestBody{Bytes,String}. URL is set before the body, so
+// we tag the call handle on SetUrl and swap its body on the following SetBody.
+// (x64: all calling conventions collapse to one ABI, so no __stdcall needed.)
+// ------------------------------------------------------------
+// The PlayFab C SDK does not use SetRequestBodyBytes/String for the login body --
+// it uses the STREAMING SetRequestBodyReadFunction (confirmed: the request went to
+// LoginWithCustomID but the body still carried the SteamTicket). So we hook that
+// too, and detect the login by BODY CONTENT ("SteamTicket") rather than only by
+// tagging the handle on SetUrl, which is order-fragile.
+typedef int32_t (*Fn_HcSetUrl)(void* call, const char* method, const char* url);
+typedef int32_t (*Fn_HcSetBodyBytes)(void* call, const uint8_t* body, uint32_t size);
+typedef int32_t (*Fn_HcSetBodyString)(void* call, const char* body);
+// HCHttpCallRequestBodyReadFunction: HRESULT(call, size_t offset, size_t avail,
+//   void* ctx, uint8_t* dest, size_t* written)
+typedef int32_t (*Fn_HcBodyRead)(void* call, size_t offset, size_t avail,
+                                 void* ctx, uint8_t* dest, size_t* written);
+typedef int32_t (*Fn_HcSetBodyRead)(void* call, Fn_HcBodyRead readFn,
+                                    size_t bodySize, void* ctx);
+static Fn_HcSetUrl        g_origHcSetUrl        = nullptr;
+static Fn_HcSetBodyBytes  g_origHcSetBodyBytes  = nullptr;
+static Fn_HcSetBodyString g_origHcSetBodyString = nullptr;
+static Fn_HcSetBodyRead   g_origHcSetBodyRead   = nullptr;
+static volatile LONG      g_HcHookDone          = 0;
+static volatile LONG      g_HcRedirLogged       = 0;
+static volatile LONG      g_HcBodyLogged        = 0;
+static CRITICAL_SECTION   g_HcLock;
+static std::set<void*>    g_LoginCalls;   // handles tagged as a login on SetUrl
+// The forged CustomId body is identical for every login this session, so a single
+// buffer served by our read function is safe.
+static char               g_LoginBody[256]  = {};
+static uint32_t           g_LoginBodyLen    = 0;
+
+static bool BodyIsSteamLogin(const void* p, size_t n)
+{
+    static const char needle[] = "SteamTicket";
+    const size_t nl = sizeof(needle) - 1;
+    if (!p || n < nl) return false;
+    const char* b = (const char*)p;
+    for (size_t i = 0; i + nl <= n; ++i)
+        if (memcmp(b + i, needle, nl) == 0) return true;
+    return false;
+}
+
+// Write "<prefix>LoginWithCustomID<suffix>" -- preserves host + query, only the
+// endpoint name changes. Returns false if url is not a configured platform login.
+static bool RewriteLoginUrl(const char* url, char* out, size_t outSize)
+{
+    const char* list = g_LoginEndpoints[0] ? g_LoginEndpoints : "LoginWithSteam";
+    char buf[256];
+    strncpy_s(buf, sizeof(buf), list, _TRUNCATE);
+    char* ctx = nullptr;
+    for (char* tok = strtok_s(buf, ",; \t", &ctx); tok; tok = strtok_s(nullptr, ",; \t", &ctx)) {
+        const char* hit = strstr(url, tok);
+        if (hit) {
+            _snprintf_s(out, outSize, _TRUNCATE, "%.*sLoginWithCustomID%s",
+                        (int)(hit - url), url, hit + strlen(tok));
+            return true;
+        }
+    }
+    return false;
+}
+
+static void MakeCustomIdBody(char* out, size_t outSize)
+{
+    _snprintf_s(out, outSize, _TRUNCATE,
+                "{\"TitleId\":\"%s\",\"CustomId\":\"%s\",\"CreateAccount\":true}",
+                g_TitleIdA, GetCustomId());
+}
+
+static void EnsureLoginBody()
+{
+    if (g_LoginBodyLen == 0) {
+        MakeCustomIdBody(g_LoginBody, sizeof(g_LoginBody));
+        g_LoginBodyLen = (uint32_t)strlen(g_LoginBody);
+    }
+}
+
+static void LogBodySwapOnce(const char* how)
+{
+    if (InterlockedExchange(&g_HcBodyLogged, 1) == 0)
+        LOG("[PlayFab] native HC body swap (%s): SteamTicket -> CustomId (%u bytes)",
+            how, g_LoginBodyLen);
+}
+
+// Our replacement read function: serves the CustomId body from g_LoginBody.
+static int32_t OurBodyRead(void* /*call*/, size_t offset, size_t avail,
+                           void* /*ctx*/, uint8_t* dest, size_t* written)
+{
+    size_t remaining = (offset < g_LoginBodyLen) ? (g_LoginBodyLen - offset) : 0;
+    size_t n = remaining < avail ? remaining : avail;
+    if (n && dest) memcpy(dest, g_LoginBody + offset, n);
+    if (written) *written = n;
+    return 0;   // S_OK
+}
+
+// erase-and-test: true exactly once, for the SetBody that follows a login SetUrl.
+static bool TakeLoginCall(void* call)
+{
+    EnterCriticalSection(&g_HcLock);
+    bool r = g_LoginCalls.erase(call) != 0;
+    LeaveCriticalSection(&g_HcLock);
+    return r;
+}
+
+static int32_t Hooked_HcSetUrl(void* call, const char* method, const char* url)
+{
+    if (url && g_TitleIdA[0] && MatchLoginEndpoint(url)) {
+        char newUrl[600];
+        if (RewriteLoginUrl(url, newUrl, sizeof(newUrl))) {
+            EnterCriticalSection(&g_HcLock);
+            g_LoginCalls.insert(call);
+            LeaveCriticalSection(&g_HcLock);
+            if (InterlockedExchange(&g_HcRedirLogged, 1) == 0)
+                LOG("[PlayFab] native HC login: %s -> LoginWithCustomID (CustomId=%s)",
+                    url, GetCustomId());
+            return g_origHcSetUrl(call, method, newUrl);
+        }
+    }
+    return g_origHcSetUrl(call, method, url);
+}
+
+static int32_t Hooked_HcSetBodyBytes(void* call, const uint8_t* body, uint32_t size)
+{
+    if (g_TitleIdA[0] && (TakeLoginCall(call) || BodyIsSteamLogin(body, size))) {
+        (void)TakeLoginCall(call);   // clear the tag if content matched
+        EnsureLoginBody();
+        LogBodySwapOnce("bytes");
+        return g_origHcSetBodyBytes(call, (const uint8_t*)g_LoginBody, g_LoginBodyLen);
+    }
+    return g_origHcSetBodyBytes(call, body, size);
+}
+
+static int32_t Hooked_HcSetBodyString(void* call, const char* body)
+{
+    if (g_TitleIdA[0] && (TakeLoginCall(call) || (body && strstr(body, "SteamTicket")))) {
+        (void)TakeLoginCall(call);
+        EnsureLoginBody();
+        LogBodySwapOnce("string");
+        return g_origHcSetBodyString(call, g_LoginBody);
+    }
+    return g_origHcSetBodyString(call, body);
+}
+
+// The path the PlayFab C SDK actually uses. Swap the whole streaming body for our
+// CustomId body: replace both the read function and the declared body size (which
+// libHttpClient uses for Content-Length), so the size stays consistent.
+static int32_t Hooked_HcSetBodyRead(void* call, Fn_HcBodyRead readFn,
+                                    size_t bodySize, void* ctx)
+{
+    if (g_TitleIdA[0] && TakeLoginCall(call)) {
+        EnsureLoginBody();
+        LogBodySwapOnce("readfn");
+        return g_origHcSetBodyRead(call, &OurBodyRead, g_LoginBodyLen, nullptr);
+    }
+    return g_origHcSetBodyRead(call, readFn, bodySize, ctx);
+}
+
+// Mono-independent, like the WinHTTP redirect. No-op on Mono games (the DLL is
+// simply absent).
+static void InstallHcLoginRewrite()
+{
+    if (!g_TitleIdW[0]) return;
+    if (InterlockedCompareExchange(&g_HcHookDone, 0, 0)) return;
+    HMODULE h = GetModuleHandleW(L"libHttpClient.Win32.dll");
+    if (!h) return;   // native PlayFab SDK not loaded (yet, or a Mono game)
+    void* pu = (void*)GetProcAddress(h, "HCHttpCallRequestSetUrl");
+    if (!pu) return;
+    if (MH_CreateHook(pu, (void*)&Hooked_HcSetUrl, (void**)&g_origHcSetUrl) != MH_OK) return;
+    MH_EnableHook(pu);
+    void* pb = (void*)GetProcAddress(h, "HCHttpCallRequestSetRequestBodyBytes");
+    if (pb && MH_CreateHook(pb, (void*)&Hooked_HcSetBodyBytes, (void**)&g_origHcSetBodyBytes) == MH_OK)
+        MH_EnableHook(pb);
+    void* ps = (void*)GetProcAddress(h, "HCHttpCallRequestSetRequestBodyString");
+    if (ps && MH_CreateHook(ps, (void*)&Hooked_HcSetBodyString, (void**)&g_origHcSetBodyString) == MH_OK)
+        MH_EnableHook(ps);
+    // The one the PlayFab C SDK actually uses for the login body.
+    void* pr = (void*)GetProcAddress(h, "HCHttpCallRequestSetRequestBodyReadFunction");
+    if (pr && MH_CreateHook(pr, (void*)&Hooked_HcSetBodyRead, (void**)&g_origHcSetBodyRead) == MH_OK)
+        MH_EnableHook(pr);
+    InterlockedExchange(&g_HcHookDone, 1);
+    LOG("[PlayFab] libHttpClient login-rewrite hooks installed (SetUrl@%p bytes@%p str@%p readfn@%p)",
+        pu, pb, ps, pr);
+}
+
+// The native WinHTTP host-rewrite needs NO Mono runtime -- it hooks winhttp.dll
+// directly. It MUST live outside the Mono gate: native PlayFab games (No Man's
+// Sky) have no Mono, so MONO_TryInit() fails, and when this was below that gate
+// the redirect was structurally unreachable for exactly the native games it
+// exists to serve (the plugin logged "init ... nativeRedirect=1" but never
+// installed the hook).
+static void InstallNativeRedirect()
+{
+    if (!g_bNativeRedirect || !g_TitleIdW[0]) return;
+    if (InterlockedCompareExchange(&g_WinHttpHookDone, 0, 0)) return;
+    HMODULE hWin = GetModuleHandleW(L"winhttp.dll");
+    if (!hWin) return;   // not loaded yet -- watcher retries
+    void* pc = (void*)GetProcAddress(hWin, "WinHttpConnect");
+    if (pc && MH_CreateHook(pc, (void*)&Hooked_WinHttpConnect,
+                            (void**)&g_origWinHttpConnect) == MH_OK) {
+        MH_EnableHook(pc);
+        InterlockedExchange(&g_WinHttpHookDone, 1);
+        LOG("[PlayFab] WinHttpConnect hook @ %p (redirect *.playfabapi.com -> %s.playfabapi.com)",
+            pc, g_TitleIdA);
+    }
+}
+
 static bool TryInstallAll()
 {
-    if (!MONO_TryInit()) return false;
+    // Mono-independent native paths first: host redirect + libHttpClient login
+    // rewrite. Both no-op on Mono games (no winhttp target / no libHttpClient).
+    InstallNativeRedirect();
+    InstallHcLoginRewrite();
+    const bool winhttpReady = (!g_bNativeRedirect || !g_TitleIdW[0] ||
+                               InterlockedCompareExchange(&g_WinHttpHookDone, 0, 0) != 0);
+    // Only wait on the libHttpClient hook if that DLL is actually present (native
+    // PlayFab game). Mono games never load it, so do not block on it there.
+    const bool hcReady = (GetModuleHandleW(L"libHttpClient.Win32.dll") == nullptr) ||
+                         (InterlockedCompareExchange(&g_HcHookDone, 0, 0) != 0);
+    const bool nativeReady = winhttpReady && hcReady;
+
+    // Everything below is Mono-only. A native game (NMS) has no Mono runtime, so
+    // once the native redirect is in there is nothing more to do -- report ready
+    // instead of spinning "not ready" forever waiting for a Mono that never loads.
+    if (!MONO_TryInit())
+        return nativeReady;
 
     TryRedirectTitleId();
 
@@ -336,27 +571,12 @@ static bool TryInstallAll()
         }
     }
 
-    // -- native Party endpoint redirect --
-    if (g_bNativeRedirect && g_TitleIdW[0] &&
-        !InterlockedCompareExchange(&g_WinHttpHookDone, 0, 0)) {
-        HMODULE hWin = GetModuleHandleW(L"winhttp.dll");
-        if (hWin) {
-            void* pc = (void*)GetProcAddress(hWin, "WinHttpConnect");
-            if (pc && MH_CreateHook(pc, (void*)&Hooked_WinHttpConnect,
-                                    (void**)&g_origWinHttpConnect) == MH_OK) {
-                MH_EnableHook(pc);
-                InterlockedExchange(&g_WinHttpHookDone, 1);
-                LOG("[PlayFab] WinHttpConnect hook @ %p (redirect *.playfabapi.com -> %s.playfabapi.com)",
-                    pc, g_TitleIdA);
-            }
-        }
-    }
+    // (native redirect already installed by InstallNativeRedirect() above)
 
     ApplyGate();
 
     bool loginReady   = InterlockedCompareExchange(&g_LoginHookDone, 0, 0) != 0;
-    bool nativeReady  = (!g_bNativeRedirect || !g_TitleIdW[0] ||
-                         InterlockedCompareExchange(&g_WinHttpHookDone, 0, 0) != 0);
+    // nativeReady already computed above (before the Mono gate).
     bool titleReady   = (!g_TitleIdA[0] ||
                          InterlockedCompareExchange(&g_TitleIdRedirected, 0, 0) != 0);
     bool gateReady    = (!GateConfigured() || g_GateKlass != nullptr);
@@ -433,6 +653,7 @@ extern "C" __declspec(dllexport) int __cdecl UCO_PluginInit(const UCO_PluginCont
     if (MH_Initialize() != MH_OK)
         LOG("[PlayFab] MH_Initialize non-OK (already inited?)");
 
+    InitializeCriticalSection(&g_HcLock);   // guards g_LoginCalls (Module 5)
     g_hWatcherThread = CreateThread(nullptr, 0, WatcherProc, nullptr, 0, nullptr);
     return 0;
 }
