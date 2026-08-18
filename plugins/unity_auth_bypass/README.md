@@ -36,20 +36,11 @@ Task SignInWithSteamAsync(string ticket, string identity, SignInOptions options)
 
 | Game | Steam AppId | Notes |
 |---|---|---|
-| **Phasmophobia** | 739630 | Used alongside [`photon_universal`](../photon_universal/) (Phasmo's multiplayer is Photon). Also needs the Phasmo-specific patches below. |
+| _None in the release tree yet_ | | Keep game-specific experiments outside regular release plugins until they are supportable. |
 
 The UGS hook itself is game-agnostic — it targets `Unity.Services.Authentication`, not any game's code — so it should apply to other Unity games that sign into UGS with a Steam ticket.
 
-## Phasmophobia-specific extras
-
-Phasmophobia uses **Beebyte-style obfuscation**, which renames every class and method, so its own Steam gate can't be found by name. The plugin includes two extra, byte-signature-driven patches for it:
-
-1. **Obfuscated `SteamAuth` entry point** — located by scanning `GameAssembly.dll`'s `.text` for a byte signature, then hooked to return null. (Same function OFM patches at RVA `0x42CA4A0` on that build.)
-2. **`SteamAccountGate` NOP** — at RVA `0xEAF7CE` in Phasmo build 23249745. The bytes are **verified before patching**, so a different build is skipped rather than corrupted.
-
-Both are safe on non-Phasmo games: if the signature doesn't match, the patch is skipped and logged.
-
-> `photon_universal` bundles an equivalent Phasmo gate NOP, so for Phasmophobia you generally want both plugins present.
+> Use this standalone plugin for non-Photon UGS games. Game-specific experiments should stay outside release packaging until they are ready.
 
 ## Setup
 
@@ -63,7 +54,6 @@ Both are safe on non-Phasmo games: if the signature doesn't match, the patch is 
    PluginsFolder=plugins
    GetStubbedLol=false
    ```
-4. For a Photon game like Phasmophobia, add `photon_universal.dll` and its `[Realtime]` section too.
 
 ## Verify
 
@@ -72,8 +62,6 @@ Get-Content "$env:TEMP\uc_online2.log" -Wait -Tail 40 | Select-String '\[Auth\]'
 ```
 
 - `[Auth] SignInWithSteamAsync intercepted -> SignInAnonymouslyAsync` — **the line that proves the fix**.
-- `[Auth] Phasmo SteamAuth signature matched at … / hook installed` — Phasmo gate found (Phasmo only).
-- `[Auth] Phasmo SteamAuth signature NOT FOUND …` — expected on any non-Phasmo game; harmless.
 
 If you never see the intercept line, the game either isn't using UGS Steam sign-in or hadn't reached it yet.
 
@@ -89,5 +77,4 @@ Output: `plugins\unity_auth_bypass\relbuild\x64\unity_auth_bypass.dll`. IL2CPP o
 
 - **IL2CPP only.** It resolves methods through the IL2CPP runtime (`GameAssembly.dll`); a Mono game needs a different approach.
 - Anonymous UGS sign-in means **no Steam-linked identity** — anything the game ties to a Steam-backed UGS account (cross-device progression, friend lookups by Steam ID) won't behave normally.
-- The Phasmo byte signature and RVA are pinned to build **23249745**. After a Phasmo update they'll likely stop matching; the plugin logs that and skips rather than misfiring, but the offsets then need re-locating.
 - Doesn't help when the backend validates ownership **server-side** in a way anonymous sign-in can't satisfy — that's a different class of wall entirely.

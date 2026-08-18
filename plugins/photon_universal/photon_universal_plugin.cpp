@@ -7,13 +7,10 @@
 //   * Photon Realtime / PUN  (IL2CPP and Mono backends)
 //   * Photon Fusion 2        (IL2CPP)
 //   * Photon Voice           (paired with Realtime/PUN)
-//   * Unity Services auth bypass  (SignInWithSteam -> anonymous)
-//   * Phasmophobia SteamAuth gate NOP (game-specific)
 //
 // At init we auto-detect:
 //   * Unity backend (Mono vs IL2CPP) via runtime DLL presence
 //   * Photon flavor (Realtime/PUN vs Fusion) via metadata/assembly scan
-//   * Phasmo byte signature in GameAssembly.dll
 // and install only the relevant module hooks.
 //
 // INI config (union-crax.ini next to the game exe):
@@ -34,6 +31,9 @@
 // MinHook is statically linked.
 // ============================================================
 #include <Windows.h>
+#ifdef UCO_PHASMO_EXPERIMENTAL
+#include <DbgHelp.h>
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +54,10 @@ static uint32_t  g_ForcedAppId      = 480;
 static uint32_t  g_OriginalAppId    = 0;
 static volatile LONG g_bShutdown    = 0;
 static HANDLE    g_hWatcherThread   = nullptr;
+#ifdef UCO_PHASMO_EXPERIMENTAL
+static PVOID     g_hCrashCapture    = nullptr;
+static volatile LONG g_CrashCaptureWritten = 0;
+#endif
 
 #define LOG(...) do { if (g_Log) g_Log(__VA_ARGS__); } while (0)
 
@@ -77,6 +81,47 @@ extern "C" void IL2CPP_Log(const char* fmt, ...)
     va_end(ap);
     g_Log("%s", buf);
 }
+
+#ifdef UCO_PHASMO_EXPERIMENTAL
+// Temporary crash capture for IL2CPP startup failures that bypass the game's
+// disabled crash sender and do not reach Windows Error Reporting.
+static LONG CALLBACK CaptureUnhandledAccessViolation(PEXCEPTION_POINTERS info)
+{
+    if (!info || !info->ExceptionRecord ||
+        info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+        InterlockedCompareExchange(&g_CrashCaptureWritten, 1, 0) != 0)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    char tempPath[MAX_PATH] = {};
+    char dumpPath[MAX_PATH] = {};
+    if (GetTempPathA((DWORD)sizeof(tempPath), tempPath))
+    {
+        _snprintf_s(dumpPath, sizeof(dumpPath), _TRUNCATE,
+            "%suco2_phasmo_av_%lu.dmp", tempPath, GetCurrentProcessId());
+        HANDLE file = CreateFileA(dumpPath, GENERIC_WRITE, 0, nullptr,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            MINIDUMP_EXCEPTION_INFORMATION exceptionInfo = {};
+            exceptionInfo.ThreadId = GetCurrentThreadId();
+            exceptionInfo.ExceptionPointers = info;
+            exceptionInfo.ClientPointers = FALSE;
+            HMODULE dbghelp = LoadLibraryA("DbgHelp.dll");
+            auto writeDump = dbghelp
+                ? (decltype(&MiniDumpWriteDump))GetProcAddress(dbghelp,
+                    "MiniDumpWriteDump") : nullptr;
+            if (writeDump)
+                writeDump(GetCurrentProcess(), GetCurrentProcessId(), file,
+                    (MINIDUMP_TYPE)(MiniDumpWithDataSegs | MiniDumpWithThreadInfo |
+                                    MiniDumpWithUnloadedModules),
+                    &exceptionInfo, nullptr, nullptr);
+            if (dbghelp) FreeLibrary(dbghelp);
+            CloseHandle(file);
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
 
 // Resolve <game>\union-crax.ini path once.
 static const char* GetIniPath()
@@ -550,36 +595,134 @@ static void ReadIni(const char* ini)
 } // namespace ModFusion
 
 
+#ifdef UCO_PHASMO_EXPERIMENTAL
 // ============================================================
 // MODULE: Unity Services Auth (IL2CPP)
 //
-// Generic for any IL2CPP game that uses Unity Gaming Services:
-// SignInWithSteamAsync -> SignInAnonymouslyAsync, plus stubs
-// for LinkWithSteamAsync / UpdatePlayerNameAsync /
-// RefreshAccessTokenAsync / HandleSignInRefreshRequestAsync.
+// Experimental, unreleased Phasmophobia work. The release
+// photon_universal build compiles this section out.
 // ============================================================
 namespace ModUnityAuth {
 
 typedef void* (__fastcall *Fn_Task)(void* pThis, void* a1, void* a2, void* a3);
 static Fn_Task g_pfnSignInAnon          = nullptr;
-static Fn_Task g_pfnOrigSignInSteam     = nullptr;
-static Fn_Task g_pfnOrigLinkSteam       = nullptr;
-static Fn_Task g_pfnOrigUpdatePlayer    = nullptr;
-static Fn_Task g_pfnOrigRefreshToken    = nullptr;
-static Fn_Task g_pfnOrigHandleSignIn    = nullptr;
+static Fn_Task g_pfnOrigSignInAnon[5]   = {};
+static Fn_Task g_pfnOrigExternalSignIn[5] = {};
+static Fn_Task g_pfnOrigSignInSteam[5]  = {};
+static Fn_Task g_pfnOrigLinkSteam[5]    = {};
+static Fn_Task g_pfnOrigUpdatePlayer[5] = {};
+static Fn_Task g_pfnOrigRefreshToken[5] = {};
+static Fn_Task g_pfnOrigHandleSignIn[5] = {};
+static bool g_SteamSignInInstalled = false;
+typedef void* (__fastcall *Fn_SelfReport)(void* detection);
+static Fn_SelfReport g_pfnOrigSelfReport = nullptr;
+static bool g_SelfReportInstalled = false;
+typedef void (__fastcall *Fn_AuthRequestCompleted)(void* pThis, void* tcs,
+    int64_t responseCode, bool isNetworkError, bool isServerError,
+    void* errorText, void* bodyText, void* headers, void* method);
+static Fn_AuthRequestCompleted g_pfnOrigAuthRequestCompleted = nullptr;
+static bool g_AuthRequestCompletedInstalled = false;
 
 typedef void* (__fastcall *Fn_GetCompleted)();
 static Fn_GetCompleted g_pfnTaskCompleted = nullptr;
+typedef void (__fastcall *Fn_VoidOne)(void*, void*);
+typedef void (__fastcall *Fn_VoidZero)(void*);
+static Fn_VoidOne g_pfnOrigRemoteConfigAdd = nullptr;
+static Fn_VoidZero g_pfnOrigValidateDependencies = nullptr;
+
+static void __fastcall Hooked_RemoteConfigAdd(void* pThis, void*)
+{
+    LOG("[Auth] RemoteConfig FetchCompleted registration skipped");
+}
+
+static void __fastcall Hooked_ValidateDependencies(void* pThis)
+{
+    LOG("[Auth] CloudCode dependency validation skipped");
+}
+
+typedef void* (__fastcall *Fn_GetObject)(void* pThis);
+typedef void  (__fastcall *Fn_SetString)(void* pThis, void* value);
+typedef void  (__fastcall *Fn_SetState)(void* pThis, int value);
+typedef void  (__fastcall *Fn_SetObject)(void* pThis, void* value);
+typedef void  (__fastcall *Fn_PlayerInfoCtor)(void* pThis, void* playerId);
+
+static Fn_GetObject      g_pfnGetPlayerIdComponent = nullptr;
+static Fn_GetObject      g_pfnGetAccessTokenComponent = nullptr;
+static Fn_GetObject      g_pfnGetSessionTokenComponent = nullptr;
+static Fn_SetString      g_pfnSetPlayerId = nullptr;
+static Fn_SetString      g_pfnSetAccessToken = nullptr;
+static Fn_SetString      g_pfnSetSessionToken = nullptr;
+static Fn_SetState       g_pfnSetState = nullptr;
+static Fn_SetObject      g_pfnSetPlayerInfo = nullptr;
+static Fn_PlayerInfoCtor g_pfnPlayerInfoCtor = nullptr;
+static Il2CppClass*      g_pPlayerInfoClass = nullptr;
+
+static bool CompleteLocalSignIn(void* pThis)
+{
+    if (!pThis || !g_pfnTaskCompleted || !g_pfnGetPlayerIdComponent ||
+        !g_pfnGetAccessTokenComponent || !g_pfnGetSessionTokenComponent ||
+        !g_pfnSetPlayerId || !g_pfnSetAccessToken || !g_pfnSetSessionToken ||
+        !g_pfnSetState)
+        return false;
+
+    char playerId[64] = {};
+    _snprintf_s(playerId, sizeof(playerId), _TRUNCATE, "uco2-%u-%lu",
+        g_OriginalAppId ? g_OriginalAppId : g_ForcedAppId, GetCurrentProcessId());
+    void* id = IL2CPP_StringNew(playerId);
+    void* accessToken = IL2CPP_StringNew(
+        "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1Y28yLWxvY2FsIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjQxMDAwMDAwMDB9.c2ln");
+    if (!id || !accessToken) return false;
+
+    void* playerIdComponent = g_pfnGetPlayerIdComponent(pThis);
+    void* accessTokenComponent = g_pfnGetAccessTokenComponent(pThis);
+    void* sessionTokenComponent = g_pfnGetSessionTokenComponent(pThis);
+    if (!playerIdComponent || !accessTokenComponent || !sessionTokenComponent)
+        return false;
+
+    g_pfnSetPlayerId(playerIdComponent, id);
+    g_pfnSetAccessToken(accessTokenComponent, accessToken);
+    // Do not invent a server session token. Leaving this empty prevents UGS
+    // from attempting a refresh with a value the service cannot validate.
+    g_pfnSetSessionToken(sessionTokenComponent, nullptr);
+
+    if (g_pPlayerInfoClass && g_pfnPlayerInfoCtor && g_pfnSetPlayerInfo)
+    {
+        Il2CppObject* info = IL2CPP_ObjectNew(g_pPlayerInfoClass);
+        if (info)
+        {
+            g_pfnPlayerInfoCtor(info, id);
+            g_pfnSetPlayerInfo(pThis, info);
+        }
+    }
+
+    // AuthenticationState.Authorized is value 2 in UGS Authentication 3.x.
+    g_pfnSetState(pThis, 2);
+    LOG("[Auth] local Unity session authorized as %s", playerId);
+    return true;
+}
+
+static void* __fastcall Hooked_LocalSignIn(void* pThis, void*, void*, void*)
+{
+    LOG("[Auth] Unity sign-in intercepted -> local authorized session");
+    if (CompleteLocalSignIn(pThis)) return g_pfnTaskCompleted();
+    LOG("[Auth] local sign-in setup incomplete");
+    return nullptr;
+}
 
 static void* __fastcall Hooked_SignInWithSteam(void* pThis, void* a1, void* a2, void* a3) {
     LOG("[Auth] SignInWithSteam intercepted -> SignInAnonymouslyAsync");
-    if (g_pfnSignInAnon) return g_pfnSignInAnon(pThis, nullptr, nullptr, nullptr);
-    return nullptr;
+    Il2CppObject* task = IL2CPP_InvokeObjectOne((Il2CppObject*)pThis,
+        "SignInAnonymouslyAsync", nullptr);
+    if (task) return task;
+
+    LOG("[Auth] anonymous sign-in invocation failed; using original Steam sign-in");
+    return g_pfnOrigSignInSteam[2]
+        ? g_pfnOrigSignInSteam[2](pThis, a1, a2, a3) : nullptr;
 }
 static void* __fastcall Hooked_LinkSteam(void* pThis, void* a1, void* a2, void* a3) {
     LOG("[Auth] LinkWithSteam intercepted -> CompletedTask");
     if (g_pfnTaskCompleted) return g_pfnTaskCompleted();
-    return nullptr;
+    return nullptr; // Not installed unless CompletedTask resolved.
 }
 static void* __fastcall Hooked_UpdatePlayer(void* pThis, void* a1, void* a2, void* a3) {
     LOG("[Auth] UpdatePlayerName intercepted -> CompletedTask");
@@ -596,33 +739,165 @@ static void* __fastcall Hooked_HandleSignInRefresh(void* pThis, void* a1, void* 
     if (g_pfnTaskCompleted) return g_pfnTaskCompleted();
     return nullptr;
 }
+static void* __fastcall Hooked_HandleSignInRequest(void* pThis, void* a1, void* a2, void* a3) {
+    LOG("[Auth] HandleSignInRequest intercepted -> CompletedTask");
+    if (g_pfnTaskCompleted) return g_pfnTaskCompleted();
+    return nullptr;
+}
+// CloudEvents.SelfReport is static and takes only the detection string.
+// Including a fake instance/extra arguments prevents the detour from matching
+// the IL2CPP calling convention reliably on x64.
+static void* __fastcall Hooked_SelfReport(void* detection) {
+    LOG("[Auth] CloudEvents.SelfReport intercepted -> CompletedTask");
+    Il2CppObject* task = IL2CPP_InvokeStaticZero("mscorlib",
+        "System.Threading.Tasks", "Task", "get_CompletedTask");
+    if (task)
+    {
+        LOG("[Auth] CloudEvents.SelfReport -> returning managed CompletedTask");
+        return task;
+    }
+    return g_pfnOrigSelfReport ? g_pfnOrigSelfReport(detection) : nullptr;
+}
+
+static void __fastcall Hooked_AuthRequestCompleted(void* pThis, void* tcs,
+    int64_t responseCode, bool isNetworkError, bool isServerError,
+    void* errorText, void* bodyText, void* headers, void* method)
+{
+    if (responseCode == 401)
+    {
+        // The UGS client decodes idToken immediately after deserializing this
+        // response. Keep the token structurally valid and include the claims
+        // its AccessToken model reads instead of returning a placeholder JWT.
+        static const char kLocalSignInResponse[] =
+            "{\"idToken\":\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+            "eyJhdWQiOlsiYjRjY2JlZTktODZiMy00MWUwLWE2NjctZmJiMjhmOWQ3YzYwIl0s"
+            "ImlhdCI6MTcwNDA2NzIwMCwic3ViIjoidWNvMi1sb2NhbCIsImV4cCI6NDEwMjQ0NDgwMH0."
+            "c2ln\",\"sessionToken\":\"uco2-local-session\","
+            "\"user\":{\"id\":\"uco2-local\",\"createdAt\":\"2024-01-01T00:00:00Z\","
+            "\"externalIds\":[],\"username\":\"uco2\"},\"lastNotificationDate\":\"\"}";
+        void* localResponse = IL2CPP_StringNew(kLocalSignInResponse);
+        if (localResponse && IL2CPP_InvokeVoidOne((Il2CppObject*)tcs,
+            "SetResult", (Il2CppObject*)localResponse))
+        {
+            LOG("[Auth] WebRequest.RequestCompleted completed local sign-in task");
+            return;
+        }
+        LOG("[Auth] failed to complete local sign-in task; using original 401 response");
+        if (g_pfnOrigAuthRequestCompleted)
+            g_pfnOrigAuthRequestCompleted(pThis, tcs, responseCode,
+                isNetworkError, isServerError, errorText, bodyText, headers,
+                method);
+        return;
+    }
+    if (g_pfnOrigAuthRequestCompleted)
+        g_pfnOrigAuthRequestCompleted(pThis, tcs, responseCode, isNetworkError,
+            isServerError, errorText, bodyText, headers, method);
+}
+
+static bool TryInstallEarlySelfReportHook()
+{
+    if (g_SelfReportInstalled || !g_pfnTaskCompleted) return g_SelfReportInstalled;
+
+    void* fn = IL2CPP_FindMethodPtr("Assembly-CSharp", "", "CloudEvents", "SelfReport", -1);
+    if (!fn)
+        fn = IL2CPP_FindMethodPtr("Assembly-CSharp-firstpass", "", "CloudEvents", "SelfReport", -1);
+    if (!fn) return false;
+
+    if (MH_CreateHook(fn, (void*)&Hooked_SelfReport,
+        (void**)&g_pfnOrigSelfReport) == MH_OK &&
+        MH_EnableHook(fn) == MH_OK)
+    {
+        g_SelfReportInstalled = true;
+        LOG("[Auth] CloudEvents.SelfReport early hook @ %p", fn);
+        return true;
+    }
+    return false;
+}
+
+static bool TryInstallEarlyAuthRequestHook()
+{
+    if (g_AuthRequestCompletedInstalled) return true;
+
+    void* fn = IL2CPP_FindMethodPtr(nullptr, "Unity.Services.Authentication",
+        "WebRequest", "RequestCompleted", 7);
+    if (!fn) return false;
+
+    if (MH_CreateHook(fn, (void*)&Hooked_AuthRequestCompleted,
+        (void**)&g_pfnOrigAuthRequestCompleted) == MH_OK &&
+        MH_EnableHook(fn) == MH_OK)
+    {
+        g_AuthRequestCompletedInstalled = true;
+        LOG("[Auth] Authentication.WebRequest.RequestCompleted hook @ %p", fn);
+        return true;
+    }
+    return false;
+}
+
+static int HookAuthOverloads(const char* methodName, void* detour, Fn_Task originals[5])
+{
+    void* hooked[5] = {};
+    int hookedCount = 0;
+    for (int argc = 0; argc <= 4; ++argc)
+    {
+        void* fn = IL2CPP_FindMethodPtr(nullptr, "Unity.Services.Authentication",
+            "AuthenticationServiceInternal", methodName, argc);
+        if (!fn) continue;
+
+        bool duplicate = false;
+        for (int i = 0; i < hookedCount; ++i)
+            if (hooked[i] == fn) { duplicate = true; break; }
+        if (duplicate) continue;
+
+        if (MH_CreateHook(fn, detour, (void**)&originals[argc]) == MH_OK &&
+            MH_EnableHook(fn) == MH_OK)
+        {
+            hooked[hookedCount++] = fn;
+            LOG("[Auth] %s overload argc=%d hook @ %p", methodName, argc, fn);
+        }
+        else
+        {
+            LOG("[Auth] failed to hook %s overload argc=%d @ %p", methodName, argc, fn);
+        }
+    }
+    return hookedCount;
+}
 
 static bool TryInstall()
 {
     if (!IL2CPP_IsReady()) return false;
-    if (!IL2CPP_FindClass("Unity.Services.Authentication", "Unity.Services.Authentication", "AuthenticationServiceInternal"))
+
+    if (!g_SelfReportInstalled)
+    {
+        void* selfReport = IL2CPP_FindMethodPtr("Assembly-CSharp", "",
+            "CloudEvents", "SelfReport", 1);
+        if (selfReport &&
+            MH_CreateHook(selfReport, (void*)&Hooked_SelfReport,
+                (void**)&g_pfnOrigSelfReport) == MH_OK &&
+            MH_EnableHook(selfReport) == MH_OK)
+        {
+            g_SelfReportInstalled = true;
+            LOG("[Auth] managed CloudEvents.SelfReport hook @ %p", selfReport);
+        }
+    }
+
+    if (g_SteamSignInInstalled) return g_SelfReportInstalled;
+    if (!IL2CPP_FindClass("Unity.Services.Authentication",
+        "Unity.Services.Authentication", "AuthenticationServiceInternal"))
         return false;
 
-    g_pfnTaskCompleted = (Fn_GetCompleted)IL2CPP_FindMethodPtr("mscorlib", "System.Threading.Tasks", "Task", "get_CompletedTask", 0);
-    g_pfnSignInAnon    = (Fn_Task)IL2CPP_FindMethodPtr(nullptr, "Unity.Services.Authentication", "AuthenticationServiceInternal", "SignInAnonymouslyAsync", -1);
+    void* steamSignIn = IL2CPP_FindMethodPtr(nullptr,
+        "Unity.Services.Authentication", "AuthenticationServiceInternal",
+        "SignInWithSteamAsync", 2);
+    if (!steamSignIn) return false;
 
-    void* fn;
-    fn = IL2CPP_FindMethodPtr(nullptr, "Unity.Services.Authentication", "AuthenticationServiceInternal", "SignInWithSteamAsync", -1);
-    if (fn && MH_CreateHook(fn, (void*)&Hooked_SignInWithSteam, (void**)&g_pfnOrigSignInSteam) == MH_OK)
-        { MH_EnableHook(fn); LOG("[Auth] SignInWithSteamAsync hook @ %p", fn); }
-    fn = IL2CPP_FindMethodPtr(nullptr, "Unity.Services.Authentication", "AuthenticationServiceInternal", "LinkWithSteamAsync", -1);
-    if (fn && MH_CreateHook(fn, (void*)&Hooked_LinkSteam, (void**)&g_pfnOrigLinkSteam) == MH_OK)
-        { MH_EnableHook(fn); LOG("[Auth] LinkWithSteamAsync hook @ %p", fn); }
-    fn = IL2CPP_FindMethodPtr(nullptr, "Unity.Services.Authentication", "AuthenticationServiceInternal", "UpdatePlayerNameAsync", -1);
-    if (fn && MH_CreateHook(fn, (void*)&Hooked_UpdatePlayer, (void**)&g_pfnOrigUpdatePlayer) == MH_OK)
-        { MH_EnableHook(fn); LOG("[Auth] UpdatePlayerNameAsync hook @ %p", fn); }
-    fn = IL2CPP_FindMethodPtr(nullptr, "Unity.Services.Authentication", "AuthenticationServiceInternal", "RefreshAccessTokenAsync", -1);
-    if (fn && MH_CreateHook(fn, (void*)&Hooked_RefreshToken, (void**)&g_pfnOrigRefreshToken) == MH_OK)
-        { MH_EnableHook(fn); LOG("[Auth] RefreshAccessTokenAsync hook @ %p", fn); }
-    fn = IL2CPP_FindMethodPtr(nullptr, "Unity.Services.Authentication", "AuthenticationServiceInternal", "HandleSignInRefreshRequestAsync", -1);
-    if (fn && MH_CreateHook(fn, (void*)&Hooked_HandleSignInRefresh, (void**)&g_pfnOrigHandleSignIn) == MH_OK)
-        { MH_EnableHook(fn); LOG("[Auth] HandleSignInRefreshRequestAsync hook @ %p", fn); }
-    LOG("[Auth] Unity Services auth module active");
+    if (MH_CreateHook(steamSignIn, (void*)&Hooked_SignInWithSteam,
+        (void**)&g_pfnOrigSignInSteam[2]) != MH_OK ||
+        MH_EnableHook(steamSignIn) != MH_OK)
+        return false;
+
+    g_SteamSignInInstalled = true;
+    LOG("[Auth] managed SignInWithSteamAsync -> anonymous sign-in hook @ %p",
+        steamSignIn);
     return true;
 }
 } // namespace ModUnityAuth
@@ -638,17 +913,89 @@ static bool TryInstall()
 // ============================================================
 namespace ModPhasmoGate {
 
-static bool TryInstall()
+// ---- Robust, build-INDEPENDENT primary: hook Phasmo's SteamAuth method ----
+// The NOP below is keyed to one build's RVA and breaks on every Phasmo update.
+// This instead SigScans the il2cpp section for the SteamAuth method prologue
+// (wildcarded on the RVA-dependent bytes only) and hooks it to return null,
+// short-circuiting the ticket fetch/POST and the "Failed to get Steam account
+// information" failure. Beebyte renames symbols, not the compiler-emitted
+// prologue, so this survives updates -- confirmed on builds 23249745 (RVA
+// 0x42CA4A0) and 24434979 (RVA 0x43D9AC0). Ported from unity_auth_bypass.
+struct PhSigByte { uint8_t v; bool wild; };
+static const PhSigByte kSteamAuthSig[] = {
+    {0x48,0},{0x89,0},{0x6C,0},{0x24,0},{0x18,0},          // mov [rsp+0x18], rbp
+    {0x56,0},{0x57,0},{0x41,0},{0x56,0},                   // push rsi; rdi; r14
+    {0x48,0},{0x83,0},{0xEC,0},{0x40,0},                   // sub rsp, 0x40
+    {0x80,0},{0x3D,0},{0,1},{0,1},{0,1},{0,1},{0x00,0},    // cmp byte[rip+RVA], 0
+    {0x49,0},{0x8B,0},{0xF9,0},{0x49,0},{0x8B,0},{0xE8,0}, // mov rdi,r9; rbp,r8
+    {0x4C,0},{0x8B,0},{0xF2,0},{0x48,0},{0x8B,0},{0xF1,0}, // mov r14,rdx; rsi,rcx
+    {0x75,0},{0x67,0},                                     // jne +0x67
+};
+static uint8_t* PhSigScan(uint8_t* base, size_t size, const PhSigByte* sig, size_t n)
+{
+    if (size < n) return nullptr;
+    for (size_t i = 0; i <= size - n; ++i) {
+        bool ok = true;
+        for (size_t j = 0; j < n; ++j)
+            if (!sig[j].wild && base[i + j] != sig[j].v) { ok = false; break; }
+        if (ok) return base + i;
+    }
+    return nullptr;
+}
+static bool PhGetSection(HMODULE mod, const char* name, uint8_t** ob, size_t* os)
+{
+    if (!mod) return false;
+    uint8_t* img = (uint8_t*)mod;
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)img;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(img + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    char p[9] = {};
+    strncpy_s(p, sizeof(p), name, 8);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+        if (memcmp(sec[i].Name, p, 8) == 0) {
+            *ob = img + sec[i].VirtualAddress;
+            *os = sec[i].Misc.VirtualSize;
+            return true;
+        }
+    return false;
+}
+typedef void (__fastcall *Fn_PhSteamAuth)(void*, void*, void*, void*);
+static Fn_PhSteamAuth g_origPhSteamAuth = nullptr;
+static volatile LONG  g_PhSteamAuthHooked = 0;
+static void __fastcall Hooked_PhSteamAuth(void*, void*, void*, void*)
+{
+    LOG("[Phasmo] SteamAuth intercepted -> auth gate skipped");
+}
+static bool TryHookSteamAuth()
+{
+    if (InterlockedCompareExchange(&g_PhSteamAuthHooked, 0, 0)) return true;
+    HMODULE ga = GetModuleHandleA("GameAssembly.dll");
+    if (!ga) return false;
+    uint8_t* sb = nullptr; size_t ss = 0;
+    if (!PhGetSection(ga, "il2cpp", &sb, &ss)) return false;   // not IL2CPP
+    uint8_t* hit = PhSigScan(sb, ss, kSteamAuthSig,
+                             sizeof(kSteamAuthSig) / sizeof(kSteamAuthSig[0]));
+    if (!hit) return false;   // not Phasmo, or prologue drifted
+    if (MH_CreateHook(hit, (void*)&Hooked_PhSteamAuth, (void**)&g_origPhSteamAuth) != MH_OK ||
+        MH_EnableHook(hit) != MH_OK)
+        return false;
+    InterlockedExchange(&g_PhSteamAuthHooked, 1);
+    LOG("[Phasmo] SteamAuth hook installed at GameAssembly+0x%llx (build-independent SigScan)",
+        (unsigned long long)(hit - (uint8_t*)ga));
+    return true;
+}
+
+// ---- Fallback: NOP the known-build je (silent-skips on other/new builds) ----
+static bool TryNopGate()
 {
     HMODULE ga = GetModuleHandleA("GameAssembly.dll");
     if (!ga) return false;
-    const uintptr_t kPatchRva = 0xEAF7CE;
+    const uintptr_t kPatchRva = 0xEAF7CE;   // build 23249745 only
     uint8_t* site = (uint8_t*)ga + kPatchRva;
     const uint8_t kExpected[6] = { 0x0F, 0x84, 0xC3, 0x06, 0x00, 0x00 };
-    if (memcmp(site, kExpected, 6) != 0) {
-        // Not Phasmo build 23249745 — silent skip (most games hit this branch).
-        return false;
-    }
+    if (memcmp(site, kExpected, 6) != 0) return false;   // drifted -> skip
     DWORD oldProt = 0;
     if (!VirtualProtect(site, 6, PAGE_EXECUTE_READWRITE, &oldProt)) {
         LOG("[Phasmo] VirtualProtect failed GLE=%lu", GetLastError());
@@ -658,10 +1005,21 @@ static bool TryInstall()
     DWORD tmp = 0;
     VirtualProtect(site, 6, oldProt, &tmp);
     FlushInstructionCache(GetCurrentProcess(), site, 6);
-    LOG("[Phasmo] SteamAccountGate NOPed at GameAssembly+0x%llx", (unsigned long long)kPatchRva);
+    LOG("[Phasmo] SteamAccountGate NOPed at GameAssembly+0x%llx (build-specific fallback)",
+        (unsigned long long)kPatchRva);
     return true;
 }
+
+static bool TryInstall()
+{
+    if (!GetModuleHandleA("GameAssembly.dll")) return false;
+    // Primary (build-independent) first; NOP is a same-build belt-and-suspenders.
+    bool any = TryHookSteamAuth();
+    if (TryNopGate()) any = true;
+    return any;
+}
 } // namespace ModPhasmoGate
+#endif // UCO_PHASMO_EXPERIMENTAL
 
 
 // ============================================================
@@ -670,24 +1028,28 @@ static bool TryInstall()
 static volatile LONG g_RealtimeIL2CPP_Done = 0;
 static volatile LONG g_RealtimeMono_Done   = 0;
 static volatile LONG g_Fusion_Done         = 0;
+#ifdef UCO_PHASMO_EXPERIMENTAL
 static volatile LONG g_UnityAuth_Done      = 0;
 static volatile LONG g_PhasmoGate_Done     = 0;
+#endif
 
 static void RunDetectionPass()
 {
-    // Phasmo gate is byte-pattern — try at any time once GameAssembly is loaded.
-    if (!InterlockedCompareExchange(&g_PhasmoGate_Done, 0, 0)) {
-        if (ModPhasmoGate::TryInstall())
-            InterlockedExchange(&g_PhasmoGate_Done, 1);
-    }
+#ifdef UCO_PHASMO_EXPERIMENTAL
+    if (!InterlockedCompareExchange(&g_PhasmoGate_Done, 0, 0))
+        if (ModPhasmoGate::TryInstall())     InterlockedExchange(&g_PhasmoGate_Done, 1);
+#endif
+
     // IL2CPP-based modules
     if (IL2CPP_TryInit()) {
         if (!InterlockedCompareExchange(&g_RealtimeIL2CPP_Done, 0, 0))
             if (ModRealtimeIL2CPP::TryInstall()) InterlockedExchange(&g_RealtimeIL2CPP_Done, 1);
         if (!InterlockedCompareExchange(&g_Fusion_Done, 0, 0))
             if (ModFusion::TryInstall())         InterlockedExchange(&g_Fusion_Done, 1);
+#ifdef UCO_PHASMO_EXPERIMENTAL
         if (!InterlockedCompareExchange(&g_UnityAuth_Done, 0, 0))
             if (ModUnityAuth::TryInstall())      InterlockedExchange(&g_UnityAuth_Done, 1);
+#endif
     }
     // Mono-based module
     if (MONO_TryInit()) {
@@ -717,8 +1079,19 @@ extern "C" __declspec(dllexport) int __cdecl UCO_PluginInit(const UCO_PluginCont
     g_ForcedAppId   = ctx->ForcedAppId;
     g_OriginalAppId = ctx->OriginalAppId;
 
+#ifdef UCO_PHASMO_EXPERIMENTAL
+    if (!g_hCrashCapture)
+        g_hCrashCapture = AddVectoredExceptionHandler(1,
+            &CaptureUnhandledAccessViolation);
+#endif
+
+#ifdef UCO_PHASMO_EXPERIMENTAL
+    LOG("[PhasmoExperimental] plugin init: AppId=%u ogAppId=%u",
+        g_ForcedAppId, g_OriginalAppId);
+#else
     LOG("[Universal] photon_universal plugin init: AppId=%u ogAppId=%u",
         g_ForcedAppId, g_OriginalAppId);
+#endif
 
     const char* ini = GetIniPath();
     if (ini) {
@@ -746,6 +1119,12 @@ extern "C" __declspec(dllexport) void __cdecl UCO_PluginShutdown(void)
     }
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
+#ifdef UCO_PHASMO_EXPERIMENTAL
+    if (g_hCrashCapture) {
+        RemoveVectoredExceptionHandler(g_hCrashCapture);
+        g_hCrashCapture = nullptr;
+    }
+#endif
     LOG("[Universal] plugin shutdown");
 }
 

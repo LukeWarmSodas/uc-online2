@@ -8,6 +8,8 @@ build/
 # Per-plugin / per-tool build outputs
 plugins/*/relbuild/
 plugins/*/debbuild/
+plugins_unreleased/*/relbuild/
+plugins_unreleased/*/debbuild/
 tools/*/relbuild/
 tools/*/debbuild/
 

@@ -9,10 +9,8 @@ It covers:
 - **Photon Realtime / PUN** — IL2CPP *and* Mono scripting backends
 - **Photon Fusion 2** — IL2CPP
 - **Photon Voice** — paired with a Realtime/PUN connection
-- **Unity Services auth bypass** — `SignInWithSteam` → anonymous
-- **Phasmophobia SteamAuth gate NOP** — game-specific byte-signature patch
 
-At init the plugin detects the Unity backend (Mono vs IL2CPP) by which runtime DLL is loaded, the Photon flavor (Realtime/PUN vs Fusion) by metadata/assembly scan, and the Phasmo gate by byte signature in `GameAssembly.dll`. Modules that don't apply are simply never installed.
+At init the plugin detects the Unity backend (Mono vs IL2CPP) by which runtime DLL is loaded and the Photon flavor (Realtime/PUN vs Fusion) by metadata/assembly scan. Modules that don't apply are simply never installed.
 
 ## Quick terminology
 
@@ -27,7 +25,6 @@ At init the plugin detects the Unity backend (Mono vs IL2CPP) by which runtime D
 |---|---|---|---|
 | **R.E.P.O.** | 3241660 | Mono · Realtime/PUN + Voice | Needs **two** Photon apps (one Realtime + one Voice). Voice slot is mandatory — Photon's NameServer rejects the connection if the Voice AppId still holds the dev's GUID. |
 | **PEAK** | 3527290 | Mono · Realtime/PUN + Voice | Same shape as R.E.P.O. — PUN + proximity-chat Voice, so both a Realtime and a Voice app are required. Steam-friends-invite co-op. |
-| **Phasmophobia** | 739630 | IL2CPP · Realtime/PUN | The built-in Phasmo SteamAuth gate NOP fires automatically (byte signature in `GameAssembly.dll`), NOPing the Beebyte-obfuscated ticket-verify gate that would otherwise block before Photon is reached. |
 | **Outbound** | 2681030 | IL2CPP · Fusion 2 | First Fusion target; works asset-patch-free at runtime. |
 
 ## How multiplayer auth is bypassed
@@ -128,9 +125,6 @@ The lines that prove each module fired:
 - `[Realtime] OpAuthenticate hook @ …` / `[Realtime/Mono] module active` — Realtime/PUN hooks in place.
 - `[Realtime] SendOp op=220 (Realtime peer): params[224] AppId -> …` — wire-time AppId rewrite fired (critical: PUN's `OpGetRegions` op 220 sends an *empty* ApplicationId that Photon would otherwise reject).
 - `[Fusion] OpAuthenticate: authType X -> 0` — Fusion auth-type override fired.
-- `[Auth] SignInWithSteam intercepted -> SignInAnonymouslyAsync` — Unity Services bypass fired.
-- `[Phasmo] SteamAccountGate NOPed at GameAssembly+0x…` — Phasmo gate patched (only on that specific Phasmo build; silently skipped everywhere else).
-
 Photon dashboard CCU going 0 → 1 confirms the connection reached your app.
 
 ## Why two Photon apps for PUN+Voice games?
@@ -160,13 +154,9 @@ Output: `plugins\photon_universal\relbuild\x64\photon_universal.dll`. MinHook is
 
 - **Realtime/PUN (IL2CPP & Mono):** hooks `LoadBalancingPeer.OpAuthenticate` / `OpAuthenticateOnce` (rewrite `appId`, force `authType=0`), `PhotonPeer.SendOperation` (rewrite `params[224]` ApplicationId + `params[217]` auth type for ops 220/226/230/231), and `AuthenticationValues.set_AuthType`. A per-peer classifier routes the first peer to the Realtime AppId and the second distinct peer to the Voice AppId.
 - **Fusion 2:** hooks `PhotonAppSettings.get_Global` (rewrite `AppIdFusion`), `AuthenticationValues.set_AuthType`, and `LoadBalancingPeer.OpAuthenticate`/`OpAuthenticateOnce` (force `authType` at offset 0x10 on the wire).
-- **Unity Services auth bypass:** hooks `Unity.Services.Authentication.AuthenticationServiceInternal.SignInWithSteamAsync` and redirects to anonymous sign-in.
-- **Phasmo gate:** verifies the byte signature before patching (so non-Phasmo / new-build games are skipped), then NOPs the `SteamAccountGate` in `GameAssembly.dll`.
-
 ## Limitations
 
 - Players must share the same Photon AppId(s).
 - The Cloudflare Worker accepts every auth request — don't reuse that Photon app for anything real.
 - Photon free tier caps CCU (~20) — fine for friend groups, not public servers.
 - Anti-cheat blocks this — don't try it on EAC/BattlEye titles.
-- The Phasmo gate NOP is keyed to a specific build's byte signature; after a Phasmo update it silently no-ops until the signature is re-located. For other deeply-obfuscated games whose own UI gates multiplayer on auth state, you may still need the standalone [`unity_auth_bypass`](../unity_auth_bypass/) plugin.
