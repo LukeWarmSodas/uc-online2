@@ -1456,14 +1456,13 @@ static bool S_CALLTYPE Hooked_BGetDLCDataByIndex(void* pThis, int iDLC, AppId_t*
 // exposes RealAppId via the same interface).
 static uint32 S_CALLTYPE Hooked_GetAppID(void* pThis)
 {
-    uint32 original = g_pfnOriginalGetAppID(pThis);
     if (g_OriginalAppId == 0 || g_OriginalAppId == g_ForcedAppId)
-        return original;
+        return g_pfnOriginalGetAppID ? g_pfnOriginalGetAppID(pThis) : g_ForcedAppId;
 
     if (!g_bGetAppIDLoggedFirst)
     {
-        UCOLOG("[UCOnline2] GetAppID hook returning ogAppId=%u (Steam reports %u)",
-            g_OriginalAppId, original);
+        UCOLOG("[UCOnline2] GetAppID hook returning ogAppId=%u",
+            g_OriginalAppId);
         g_bGetAppIDLoggedFirst = true;
     }
     return g_OriginalAppId;

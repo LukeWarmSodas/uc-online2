@@ -3,6 +3,10 @@ setlocal enableextensions enabledelayedexpansion
 title UCOnline2 - patch.bat (auto-patcher)
 color 0b
 
+echo ============================================================
+echo  UCOnline2 Auto-Patcher
+echo ============================================================
+
 rem ============================================================
 rem  UCOnline2 patch.bat
 rem
@@ -84,8 +88,8 @@ if not defined GAME echo [ERROR] No folder given.& goto :end
 if not exist "%GAME%\" echo [ERROR] Not a folder: %GAME%& goto :end
 rem Strip a trailing backslash so joined paths never end up with a double one.
 if "%GAME:~-1%"=="\" set "GAME=%GAME:~0,-1%"
-echo.
-echo Game folder: %GAME%
+call :stage "1/4  SCAN GAME"
+echo   Folder:      %GAME%
 
 rem ============================================================
 rem  Identify the engine
@@ -159,10 +163,6 @@ if exist "%GAME%\steamclient64.ini" (
   echo.
 )
 
-echo Engine:      %ENGINE%
-if defined DATA     echo Data folder: %DATA%
-if defined GAME_EXE echo Executable:  %GAME_EXE%
-
 rem ============================================================
 rem  Find where steam_api64.dll belongs
 rem
@@ -219,7 +219,34 @@ if not defined STEAM_DIR if not defined IS_32BIT (
   if "%ENGINE%"=="Unreal" for %%F in ("%GAME_EXE%") do set "STEAM_DIR=%%~dpF"
   echo [WARN] Game ships no steam_api64.dll; falling back to the usual place.
 )
-if defined STEAM_DIR echo Steam DLL:   %STEAM_DIR%
+rem SteamStub detection has to inspect the executable that actually starts,
+rem not a launcher elsewhere in the tree. Unreal already supplied GAME_EXE.
+rem For Unity, prefer the exe matching <name>_Data; for generic engines (and
+rem unusual Unity layouts), use the biggest exe beside the selected Steam DLL.
+if not defined GAME_EXE if "%ENGINE%"=="Unity" (
+  for %%D in ("%DATA%") do (
+    set "DATA_STEM=%%~nD"
+    set "DATA_STEM=!DATA_STEM:~0,-5!"
+    if exist "%%~dpD!DATA_STEM!.exe" set "GAME_EXE=%%~dpD!DATA_STEM!.exe"
+  )
+)
+if not defined GAME_EXE if defined STEAM_DIR (
+  set "GAME_EXE_SIZE=0"
+  for %%E in ("%STEAM_DIR%*.exe") do if exist "%%~fE" (
+    if %%~zE GTR !GAME_EXE_SIZE! (
+      set "GAME_EXE_SIZE=%%~zE"
+      set "GAME_EXE=%%~fE"
+    )
+  )
+)
+
+set "GET_STUBBED=false"
+set "STUB_RESULT=3"
+if defined GAME_EXE (
+  call :detect_steamstub
+) else (
+  echo [WARN] Could not identify the running executable; SteamStub was not checked.
+)
 
 rem ============================================================
 rem  Neutralize a competing Steam emulator that ships its own loader
@@ -232,32 +259,12 @@ rem  over the interfaces -- the game behaves as if the backend is broken
 rem  (looks exactly like a "missing export"). Rename the competing loader
 rem  aside (reversible, *.uco-disabled) so only UCOnline2 is live.
 rem ============================================================
-if defined STEAM_DIR (
-  set "COMPET="
-  if exist "%STEAM_DIR%SteamFix64.dll"  set "COMPET=SteamFix"
-  if exist "%STEAM_DIR%OnlineFix64.dll" set "COMPET=OnlineFix"
-  if defined COMPET (
-    echo.
-    echo [WARN] Competing emulator found in this folder: !COMPET!. It injects its
-    echo        own Steam through a winmm/version proxy and will fight UCOnline2.
-    echo        Disabling it ^(renamed to *.uco-disabled, reversible^):
-    rem Named fix files -- unambiguous, always disable.
-    for %%P in (winmm.dll winmm.txt winmm.ini SteamFix64.dll SteamFix.ini OnlineFix64.dll OnlineFix.ini dlllist.txt) do (
-      if exist "%STEAM_DIR%%%P" if not exist "%STEAM_DIR%%%P.uco-disabled" (
-        ren "%STEAM_DIR%%%P" "%%P.uco-disabled" && echo         - %%P
-      )
-    )
-    rem Generic proxy DLLs a fix MIGHT hide behind -- only disable when small,
-    rem so we never touch a legit large dll the game itself ships.
-    for %%P in (version.dll dxgi.dll dsound.dll winhttp.dll) do (
-      if exist "%STEAM_DIR%%%P" if not exist "%STEAM_DIR%%%P.uco-disabled" (
-        for %%Z in ("%STEAM_DIR%%%P") do if %%~zZ LSS 307200 (
-          ren "%STEAM_DIR%%%P" "%%P.uco-disabled" && echo         - %%P
-        )
-      )
-    )
-  )
-)
+set "FIX_DIR=%GAME%\"
+if "%ENGINE%"=="Unity"  for %%F in ("%DATA%") do set "FIX_DIR=%%~dpF"
+if "%ENGINE%"=="Generic" if defined STEAM_DIR set "FIX_DIR=%STEAM_DIR%"
+if "%ENGINE%"=="Unreal" for %%F in ("%GAME_EXE%") do set "FIX_DIR=%%~dpF"
+call :neutralize_competing "%FIX_DIR%"
+if defined STEAM_DIR if /i not "%STEAM_DIR%"=="%FIX_DIR%" call :neutralize_competing "%STEAM_DIR%"
 
 rem ============================================================
 rem  Where union-crax.ini and plugins\ must live
@@ -279,7 +286,6 @@ rem that is the folder we just picked for steam_api64.dll.
 if "%ENGINE%"=="Generic" if defined STEAM_DIR set "INI_DIR=%STEAM_DIR%"
 if "%ENGINE%"=="Unreal" for %%F in ("%GAME_EXE%") do set "INI_DIR=%%~dpF"
 if "%INI_DIR:~-1%"=="\" set "INI_DIR=%INI_DIR:~0,-1%"
-echo Config dir:  %INI_DIR%
 
 rem ============================================================
 rem  Detect backends
@@ -360,29 +366,42 @@ for /r "%GAME%" %%F in (EOSSDK-Win64-Shipping.dll) do if exist "%%~fF" set "HAS_
 for /r "%GAME%" %%F in (EOSSDK.dll) do if exist "%%~fF" set "HAS_EOS=1"
 
 echo.
-echo [DETECTED] Engine=%ENGINE%  Backend=%BACKEND%
-if defined FLAVOR (
-  echo            Photon: %FLAVOR%
-  if defined HAS_VOICE echo            Photon Voice present ^(a separate Voice app is required^).
+echo   Engine:      %ENGINE% / %BACKEND%
+if defined DATA echo   Data:        %DATA%
+if defined GAME_EXE echo   Executable:  %GAME_EXE%
+if defined STEAM_DIR echo   Steam API:   %STEAM_DIR%
+echo   Config:      %INI_DIR%
+if /i "%GET_STUBBED%"=="true" (
+  echo   SteamStub:   detected ^(runtime hook enabled^)
+) else if "%STUB_RESULT%"=="2" (
+  echo   SteamStub:   uncertain ^(unrecognized .bind layout^)
+) else if "%STUB_RESULT%"=="3" (
+  echo   SteamStub:   not checked ^(invalid or unreadable PE^)
 ) else (
-  echo            Photon: none
+  echo   SteamStub:   not detected
 )
-if defined HAS_EOS     echo            EOS: yes ^(EOS_custom plugin^)
-if defined HAS_PLAYFAB echo            PlayFab: yes ^(playfab_universal plugin^)
-if defined HAS_COHERENCE echo            coherence: yes ^(coherence_universal plugin^)
+if defined FLAVOR (
+  echo   Photon:      %FLAVOR%
+  if defined HAS_VOICE echo   Voice:      detected
+) else (
+  echo   Photon:      none
+)
+if defined HAS_EOS       echo   EOS:        detected
+if defined HAS_PLAYFAB   echo   PlayFab:    detected
+if defined HAS_COHERENCE echo   coherence:  detected
 if not defined FLAVOR if not defined HAS_EOS if not defined HAS_PLAYFAB if not defined HAS_COHERENCE (
-  echo            No secondary backend found -- if multiplayer is pure Steam
-  echo            P2P this needs no plugin at all. TEST IT BARE FIRST.
+  echo   Services:    Steam only ^(no plugin needed^)
 )
 echo.
+
+call :stage "2/4  CONFIGURE"
 
 if defined KEYONLY (
   if not defined HAS_COHERENCE (
     echo [ERROR] /keyonly only applies to coherence games, and this is not one.
     goto :end
   )
-  echo Key-only mode: the runtime key will be replaced and NOTHING else.
-  echo.
+  echo   Key-only mode: only the coherence runtime key will change.
   goto :ask_coherence
 )
 
@@ -427,10 +446,8 @@ if not defined FUSIONGUID echo [ERROR] Fusion GUID is required.& goto :end
 :ask_eos
 if not defined HAS_EOS goto :ask_playfab
 echo.
-echo This game uses EOS. EOS_custom points it at YOUR OWN free Epic app
-echo (dev.epicgames.com) and logs in anonymously with a Device ID, because
-echo Epic always rejects an emulated Steam ticket. Press Enter on any of
-echo these to write a stub section you can fill in later.
+echo   EOS needs credentials from an Epic app you control.
+echo   Press Enter to leave these blank and skip the EOS plugin.
 set /p "EOS_PRODUCT=  EOS ProductId: "
 set /p "EOS_SANDBOX=  EOS SandboxId: "
 set /p "EOS_DEPLOY=  EOS DeploymentId: "
@@ -441,11 +458,8 @@ set /p "EOS_SECRET=  EOS ClientSecret: "
 if not defined HAS_PLAYFAB goto :ask_coherence
 echo.
 if defined HAS_COHERENCE (
-  echo   NOTE: this game also uses coherence, which is far more likely to be
-  echo   what multiplayer actually runs on. Plenty of games bundle the PlayFab
-  echo   SDK for storefront or account bits without using it for co-op.
-  echo   Leave this EMPTY unless you know otherwise -- with no TitleId the
-  echo   PlayFab plugin stays idle and installs no hooks at all.
+  echo   coherence is also present and is probably the multiplayer backend.
+  echo   Leave PlayFab empty unless testing proves it is required.
   echo.
 )
 set /p "PF_TITLE=  PlayFab TitleId (press Enter to skip): "
@@ -453,16 +467,9 @@ set /p "PF_TITLE=  PlayFab TitleId (press Enter to skip): "
 :ask_coherence
 if not defined HAS_COHERENCE goto :write_ini
 echo.
-echo This game uses coherence. Multiplayer authenticates against the publisher's
-echo coherence project, which will not accept an emulated Steam ticket -- so the
-echo game has to be pointed at a project you control.
-echo.
-echo Create one at coherence.io ^(the free tier is enough^), upload the game's
-echo schema, enable ONE region, and paste the project's RUNTIME KEY below.
-echo Full instructions: plugins\coherence_universal\README.md
-echo.
-echo   Type SHARED to use the community project instead -- no coherence
-echo   account, no Unity, no schema upload. Availability is not guaranteed.
+echo   coherence needs a matching project and schema.
+echo   Enter your runtime key, type SHARED for the community project, or leave
+echo   it blank to configure later. Guide: plugins\coherence_universal\README.md
 echo.
 
 rem Offer the upload BEFORE asking for a key: you cannot give a runtime key for
@@ -470,10 +477,7 @@ rem a project you have not set up yet, and a key without a matching schema gets
 rem you a SchemaNotFound that looks like the key being wrong.
 call :find_schema_tool
 if defined SCHEMA_TOOL (
-  echo   Not uploaded the schema to your own project yet? patch.bat can run the
-  echo   upload tool now. It needs the Unity editor. Skip this if you are using
-  echo   SHARED, or if you have already uploaded this build's schema.
-  echo.
+  echo   The schema upload tool is available for your own project.
   set /p "COH_UPLOAD=  Run the schema upload tool first? (y/N): "
   if /i "!COH_UPLOAD!"=="y" call :run_schema_tool
   echo.
@@ -489,10 +493,7 @@ if /i "%COH_KEY%"=="shared" (
   set "COH_KEY=fce1ea692a854b50b9f945ef6aa17758"
   set "COH_SHARED=1"
   echo.
-  echo   Using the shared project -- its schema is already uploaded, so there
-  echo   is nothing else to do. It is a free tier, unmonitored, and shared with
-  echo   everyone else using it: if co-op stops working, suspect this first and
-  echo   set up your own project.
+  echo   [OK] Using the shared coherence project ^(availability is not guaranteed^).
 )
 
 rem Only relevant to someone bringing their OWN project. Printing it after a
@@ -500,9 +501,8 @@ rem SHARED answer tells people they need Unity immediately after they chose the
 rem route that does not, which reads as a warning that something is missing.
 if not defined COH_SHARED if defined COH_KEY (
   echo.
-  echo   NOTE: your project also needs the game's schema uploaded to it, which
-  echo   requires the Unity editor. tools\coherence_schema automates that.
-  echo   Without a matching schema the game fails with SchemaNotFound.
+  echo   [INFO] Your project needs the matching schema. The helper is in
+  echo          tools\coherence_schema; without it the game reports SchemaNotFound.
 )
 
 rem ============================================================
@@ -510,12 +510,13 @@ rem  Write union-crax.ini  (sequential appends -- robust)
 rem ============================================================
 :write_ini
 if defined KEYONLY goto :deploy_plugins
+call :stage "3/4  INSTALL"
 set "INI=%INI_DIR%\union-crax.ini"
 > "%INI%" echo [Settings]
 >> "%INI%" echo AppId=480
 >> "%INI%" echo ogAppId=%OGAPPID%
 >> "%INI%" echo PluginsFolder=plugins
->> "%INI%" echo GetStubbedLol=false
+>> "%INI%" echo GetStubbedLol=%GET_STUBBED%
 >> "%INI%" echo LogOverlay=no
 
 rem ============================================================
@@ -577,13 +578,9 @@ if not defined DLC_FOUND (
 )
 
 if not defined DLC_FOUND (
-  echo [INFO] No DLC ids found. UnlockAll still answers ownership checks; add
-  echo        "appid=name" lines under [DLC] if a DLC menu comes up empty.
+  echo [INFO] No DLC list found; UnlockAll still handles ownership checks.
 )
-echo [INFO] DLC: UnlockAll=true is set, which is enough for most games. The id
-echo        list is only needed by games that ENUMERATE their DLC, and the two
-echo        work together -- set UnlockAll=false in the ini only if you want
-echo        ONLY the listed ids to count.
+echo [OK] DLC ownership enabled ^(add appid=name only if a DLC menu is empty^).
 
 if not defined FLAVOR goto :ini_eos
 >> "%INI%" echo(
@@ -697,60 +694,46 @@ if defined HAS_COHERENCE (
 rem ============================================================
 rem  Summary
 rem ============================================================
-echo.
-echo ============================================================
-echo  DONE.
-echo.
+call :stage "4/4  RESULT"
 if defined KEYONLY (
-  echo  Key-only run: see the runtime-key result above. Nothing else in this
-  echo  install was touched.
+  echo   Done: only the coherence runtime key was processed.
   goto :summary_end
 )
 if not defined FLAVOR if not defined HAS_EOS if not defined HAS_PLAYFAB (
-  echo  No plugin needed. Launch the game and try multiplayer BARE --
-  echo  pure Steam P2P titles work through passthrough with no plugin.
+  echo   Plugins:    none needed; test the game with Steam passthrough.
 )
 if defined FLAVOR (
-  echo  Photon ^(%FLAVOR%^): on each Photon app, Manage -^> Authentication
-  echo    -^> Add Provider -^> Custom, paste your permissive Cloudflare Worker
-  echo    URL, UNCHECK "Reject Clients on Authentication Failure", Save.
-  if defined HAS_VOICE echo    This game uses Photon Voice -- you MUST create a Voice app too.
+  echo   Photon:     %FLAVOR% plugin installed.
+  if defined HAS_VOICE echo   Voice:      a Photon Voice app is required.
 )
 if defined HAS_EOS (
   if defined EOS_PRODUCT (
-    echo  EOS: EOS_custom deployed. Read the GAME'S OWN log for session
-    echo    diagnosis -- it is far more informative than uc_online2.log.
+    echo   EOS:        plugin installed.
   ) else (
-    echo  EOS: detected, plugin NOT deployed ^(no Epic app given^). Try the game
-    echo    bare first -- plenty of dual-stack titles run co-op over Steam.
+    echo   EOS:        skipped ^(no Epic credentials^).
   )
 )
 if defined HAS_PLAYFAB (
   if defined HAS_COHERENCE (
-    echo  PlayFab: the SDK is present, but coherence is almost certainly the
-    echo    multiplayer backend here. playfab_universal was copied in and is
-    echo    IDLE with no TitleId -- it installs no hooks and cannot affect the
-    echo    game's own PlayFab traffic. Get coherence working first; only set a
-    echo    TitleId if multiplayer clearly still needs PlayFab.
+    echo   PlayFab:    installed; idle while TitleId is empty.
   ) else (
-    echo  PlayFab: set [PlayFab] TitleId if you skipped it.
+    echo   PlayFab:    installed ^(set TitleId if still blank^).
   )
 )
 if defined HAS_COHERENCE (
   if defined COH_KEY (
-    echo  coherence: see the runtime-key result above. Upload the game's schema
-    echo    ^(StreamingAssets\combined.schema^) and enable ONE region -- with
-    echo    several enabled, host and joiner can land in different ones, which
-    echo    reads as "lobby doesn't exist or is full".
+    echo   coherence:  configured; use one enabled region.
   ) else (
-    echo  coherence: no runtime key given, so the game still points at the
-    echo    publisher's project and multiplayer will be refused. Re-run with a
-    echo    key, or set [Coherence] LocalMode=true to skip the cloud entirely.
+    echo   coherence:  runtime key still required.
   )
+)
+if /i "%GET_STUBBED%"=="true" (
+  echo   SteamStub:   runtime hook enabled.
 )
 echo.
 :summary_end
-echo  Log: %%TEMP%%\uc_online2.log
+echo   Config: %INI_DIR%\union-crax.ini
+echo   Log:    %%TEMP%%\uc_online2.log
 echo ============================================================
 goto :end
 
@@ -932,6 +915,98 @@ if errorlevel 1 (
   echo [OK] Installed early overlay proxy as %OVERLAY_NAME%
   echo      %OVERLAY_TARGET%
 )
+goto :eof
+
+rem ------------------------------------------------------------
+rem  :neutralize_competing <directory>
+rem
+rem  OnlineFix/SteamFix loaders often live beside the running executable while
+rem  steam_api64.dll is nested under a Unity data folder. Check both locations.
+rem ------------------------------------------------------------
+:neutralize_competing
+set "N_DIR=%~1"
+if not defined N_DIR goto :eof
+if not "%N_DIR:~-1%"=="\" set "N_DIR=%N_DIR%\"
+set "COMPET="
+if exist "%N_DIR%SteamFix64.dll"  set "COMPET=SteamFix"
+if exist "%N_DIR%OnlineFix64.dll" set "COMPET=OnlineFix"
+if not defined COMPET goto :eof
+
+echo.
+echo [WARN] Competing emulator found: %COMPET%
+echo        Folder: %N_DIR%
+echo        Disabling it ^(renamed to *.uco-disabled, reversible^):
+
+rem A named proxy is unambiguous and means generic proxies in the same folder
+rem can be left alone. This protects UCOnline2's own version.dll overlay shim.
+set "NAMED_FIX_PROXY="
+if exist "%N_DIR%winmm.dll" set "NAMED_FIX_PROXY=1"
+for %%P in (winmm.dll winmm.txt winmm.ini SteamFix64.dll SteamFix.ini OnlineFix64.dll OnlineFix.ini dlllist.txt) do (
+  if exist "%N_DIR%%%P" if not exist "%N_DIR%%%P.uco-disabled" (
+    ren "%N_DIR%%%P" "%%P.uco-disabled" && echo          - %%P
+  )
+)
+
+rem OFME's Launcher.exe can load OnlineFix64.dll directly without winmm. Its
+rem adjacent OnlineFix.json is the identifying marker, so a publisher launcher
+rem with the same generic filename is never disabled by name alone.
+if /i "%COMPET%"=="OnlineFix" if exist "%N_DIR%OnlineFix.json" (
+  for %%P in (Launcher.exe OnlineFix.json OnlineFix.url) do (
+    if exist "%N_DIR%%%P" if not exist "%N_DIR%%%P.uco-disabled" (
+      ren "%N_DIR%%%P" "%%P.uco-disabled" && echo          - %%P
+    )
+  )
+)
+
+rem Defender commonly blocks renaming the payload itself. Once every loader
+rem above is disabled the remaining DLL is inert, but say so explicitly.
+if exist "%N_DIR%OnlineFix64.dll" (
+  echo [INFO] OnlineFix64.dll remains ^(Windows may block touching it^), but its
+  echo        winmm/dlllist/Launcher load paths have been disabled.
+)
+
+rem Some fixes use only a generic proxy name. Restrict this fallback to small
+rem DLLs and only use it when no named winmm loader identified the chain.
+if not defined NAMED_FIX_PROXY for %%P in (version.dll dxgi.dll dsound.dll winhttp.dll) do (
+  if exist "%N_DIR%%%P" if not exist "%N_DIR%%%P.uco-disabled" (
+    for %%Z in ("%N_DIR%%%P") do if %%~zZ LSS 307200 (
+      ren "%N_DIR%%%P" "%%P.uco-disabled" && echo          - %%P
+    )
+  )
+)
+goto :eof
+
+rem ------------------------------------------------------------
+rem  :stage <name>
+rem ------------------------------------------------------------
+:stage
+echo.
+echo ------------------------------------------------------------
+echo  %~1
+echo ------------------------------------------------------------
+goto :eof
+
+rem ------------------------------------------------------------
+rem  :detect_steamstub
+rem
+rem  Parses the selected executable's PE section table and checks the .bind
+rem  payload for the loader signatures used by SteamStub 1.x through 3.x.
+rem  PowerShell is built into supported Windows versions and lets us inspect
+rem  binary data without shipping another executable beside patch.bat.
+rem ------------------------------------------------------------
+:detect_steamstub
+set "UCO_STUB_EXE=%GAME_EXE%"
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$p=$env:UCO_STUB_EXE; try { $b=[IO.File]::ReadAllBytes($p); if($b.Length -lt 256 -or $b[0] -ne 0x4d -or $b[1] -ne 0x5a){exit 3}; $pe=[BitConverter]::ToInt32($b,0x3c); if($pe -lt 0 -or $pe+24 -ge $b.Length -or $b[$pe] -ne 0x50 -or $b[$pe+1] -ne 0x45){exit 3}; $count=[BitConverter]::ToUInt16($b,$pe+6); $opt=[BitConverter]::ToUInt16($b,$pe+20); $table=$pe+24+$opt; $bind=$null; for($i=0;$i -lt $count;$i++){ $o=$table+40*$i; if($o+40 -gt $b.Length){break}; $name=[Text.Encoding]::ASCII.GetString($b,$o,8).Trim([char]0); if($name -eq '.bind'){ $size=[BitConverter]::ToUInt32($b,$o+16); $raw=[BitConverter]::ToUInt32($b,$o+20); if($raw -lt $b.Length){$take=[Math]::Min([int64]$size,[int64]$b.Length-$raw); $bind=New-Object byte[] $take; [Array]::Copy($b,$raw,$bind,0,$take)}; break } }; if($null -eq $bind){exit 1}; function HasSeq([byte[]]$h,[byte[]]$n){ if($h.Length -lt $n.Length){return $false}; for($x=0;$x -le $h.Length-$n.Length;$x++){ $ok=$true; for($y=0;$y -lt $n.Length;$y++){if($h[$x+$y] -ne $n[$y]){$ok=$false;break}}; if($ok){return $true} }; return $false }; $s64=[byte[]](0xe8,0,0,0,0,0x50,0x53,0x51,0x52,0x56,0x57,0x55,0x41,0x50); $s3=[byte[]](0xe8,0,0,0,0,0x50,0x53,0x51,0x52,0x56,0x57,0x55,0x8b,0x44,0x24,0x1c,0x2d,5,0,0,0,0x8b,0xcc,0x83,0xe4,0xf0,0x51,0x51,0x51,0x50); $s2=[byte[]](0x53,0x51,0x52,0x56,0x57,0x55,0x8b,0xec,0x81,0xec,0,0x10,0,0); $s1=[byte[]](0x60,0x81,0xec,0,0x10,0,0,0xbe); if((HasSeq $bind $s64) -or (HasSeq $bind $s3) -or (HasSeq $bind $s2) -or (HasSeq $bind $s1)){exit 0}; exit 2 } catch { exit 3 }" >nul 2>&1
+set "STUB_RESULT=%errorlevel%"
+if "%STUB_RESULT%"=="0" (
+  set "GET_STUBBED=true"
+) else if "%STUB_RESULT%"=="2" (
+  echo [WARN] The executable has a .bind section, but its loader signature is
+  echo        unfamiliar. SteamStub was not enabled automatically.
+) else if "%STUB_RESULT%"=="3" (
+  echo [WARN] Could not parse the executable for SteamStub detection.
+)
+set "UCO_STUB_EXE="
 goto :eof
 
 :end
