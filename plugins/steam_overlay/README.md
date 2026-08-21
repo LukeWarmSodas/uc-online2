@@ -41,6 +41,13 @@ shipping executable. It backs up a different existing proxy to
 `<name>.uco2.bak` before installing. If that backup already exists, it refuses
 to overwrite the current DLL again.
 
+Some titles are deliberately skipped. **Phasmophobia** inventories the files
+beside its executable during startup and aborts on an unrecognised
+`version.dll`, so the patcher reports `[SKIP]` and leaves the proxy out. The
+game still runs through UCOnline2 normally; it simply keeps whatever overlay
+behaviour it had, because the proxy is an optional extra rather than part of
+the emulator.
+
 For manual deployment:
 
 1. Copy `overlay_proxy.dll` beside the executable that runs the game.

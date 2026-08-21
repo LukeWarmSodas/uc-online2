@@ -88,6 +88,10 @@ if not defined GAME echo [ERROR] No folder given.& goto :end
 if not exist "%GAME%\" echo [ERROR] Not a folder: %GAME%& goto :end
 rem Strip a trailing backslash so joined paths never end up with a double one.
 if "%GAME:~-1%"=="\" set "GAME=%GAME:~0,-1%"
+rem Keep disabled third-party loaders completely outside the game tree. Some
+rem games inventory filenames recursively, so an inert OnlineFix64.dll renamed
+rem to OnlineFix64.dll.uco-disabled can still trip their integrity checks.
+set "QUARANTINE_DIR=%GAME%.uco2-quarantine"
 call :stage "1/4  SCAN GAME"
 echo   Folder:      %GAME%
 
@@ -256,8 +260,8 @@ rem  winmm.dll (or version.dll / dxgi.dll) proxy the exe loads on startup,
 rem  which in turn loads *Fix64.dll and installs its OWN Steam emulation.
 rem  Drop UCOnline2's steam_api64.dll in beside that and two emulators fight
 rem  over the interfaces -- the game behaves as if the backend is broken
-rem  (looks exactly like a "missing export"). Rename the competing loader
-rem  aside (reversible, *.uco-disabled) so only UCOnline2 is live.
+rem  (looks exactly like a "missing export"). Move the competing loader into
+rem  a reversible quarantine beside the game folder so only UCOnline2 is live.
 rem ============================================================
 set "FIX_DIR=%GAME%\"
 if "%ENGINE%"=="Unity"  for %%F in ("%DATA%") do set "FIX_DIR=%%~dpF"
@@ -874,6 +878,17 @@ if not defined OVERLAY_PROXY (
   goto :eof
 )
 
+rem Phasmophobia inventories unexpected files beside its executable during
+rem startup and aborts after reporting an unknown version.dll. UCOnline2 still
+rem loads normally through the game's steam_api64.dll, so only the optional
+rem early overlay proxy must be skipped for this title.
+if /i "%ENGINE%"=="Unity" if defined GAME_EXE for %%F in ("%GAME_EXE%") do (
+  if /i "%%~nxF"=="Phasmophobia.exe" (
+    echo [SKIP] Phasmophobia rejects an extra version.dll; overlay proxy skipped.
+    goto :eof
+  )
+)
+
 set "OVERLAY_TARGET="
 set "OVERLAY_NAME="
 if /i "%ENGINE%"=="Unity" (
@@ -930,49 +945,102 @@ if not "%N_DIR:~-1%"=="\" set "N_DIR=%N_DIR%\"
 set "COMPET="
 if exist "%N_DIR%SteamFix64.dll"  set "COMPET=SteamFix"
 if exist "%N_DIR%OnlineFix64.dll" set "COMPET=OnlineFix"
+rem Migrate leftovers made by patch.bat versions that renamed files in place.
+if exist "%N_DIR%SteamFix64.dll.uco-disabled"  set "COMPET=SteamFix"
+if exist "%N_DIR%OnlineFix64.dll.uco-disabled" set "COMPET=OnlineFix"
 if not defined COMPET goto :eof
 
 echo.
 echo [WARN] Competing emulator found: %COMPET%
 echo        Folder: %N_DIR%
-echo        Disabling it ^(renamed to *.uco-disabled, reversible^):
+echo        Moving it outside the game tree:
+echo        %QUARANTINE_DIR%
 
 rem A named proxy is unambiguous and means generic proxies in the same folder
 rem can be left alone. This protects UCOnline2's own version.dll overlay shim.
 set "NAMED_FIX_PROXY="
-if exist "%N_DIR%winmm.dll" set "NAMED_FIX_PROXY=1"
+if exist "%N_DIR%winmm.dll"              set "NAMED_FIX_PROXY=1"
+if exist "%N_DIR%winmm.dll.uco-disabled" set "NAMED_FIX_PROXY=1"
 for %%P in (winmm.dll winmm.txt winmm.ini SteamFix64.dll SteamFix.ini OnlineFix64.dll OnlineFix.ini dlllist.txt) do (
-  if exist "%N_DIR%%%P" if not exist "%N_DIR%%%P.uco-disabled" (
-    ren "%N_DIR%%%P" "%%P.uco-disabled" && echo          - %%P
-  )
+  call :quarantine_file "%N_DIR%" "%%P"
+  call :quarantine_file "%N_DIR%" "%%P.uco-disabled"
 )
 
 rem OFME's Launcher.exe can load OnlineFix64.dll directly without winmm. Its
 rem adjacent OnlineFix.json is the identifying marker, so a publisher launcher
 rem with the same generic filename is never disabled by name alone.
-if /i "%COMPET%"=="OnlineFix" if exist "%N_DIR%OnlineFix.json" (
-  for %%P in (Launcher.exe OnlineFix.json OnlineFix.url) do (
-    if exist "%N_DIR%%%P" if not exist "%N_DIR%%%P.uco-disabled" (
-      ren "%N_DIR%%%P" "%%P.uco-disabled" && echo          - %%P
-    )
+set "OFME_MARKER="
+if exist "%N_DIR%OnlineFix.json"              set "OFME_MARKER=1"
+if exist "%N_DIR%OnlineFix.json.uco-disabled" set "OFME_MARKER=1"
+if /i "%COMPET%"=="OnlineFix" if defined OFME_MARKER (
+  for %%P in (Launcher.exe OnlineFix.json OnlineFix.url PhotonBridge.dll) do (
+    call :quarantine_file "%N_DIR%" "%%P"
+    call :quarantine_file "%N_DIR%" "%%P.uco-disabled"
   )
 )
 
-rem Defender commonly blocks renaming the payload itself. Once every loader
+rem Defender commonly blocks moving the payload itself. Once every loader
 rem above is disabled the remaining DLL is inert, but say so explicitly.
 if exist "%N_DIR%OnlineFix64.dll" (
   echo [INFO] OnlineFix64.dll remains ^(Windows may block touching it^), but its
-  echo        winmm/dlllist/Launcher load paths have been disabled.
+  echo        winmm/dlllist/Launcher load paths have been quarantined.
 )
 
 rem Some fixes use only a generic proxy name. Restrict this fallback to small
 rem DLLs and only use it when no named winmm loader identified the chain.
 if not defined NAMED_FIX_PROXY for %%P in (version.dll dxgi.dll dsound.dll winhttp.dll) do (
-  if exist "%N_DIR%%%P" if not exist "%N_DIR%%%P.uco-disabled" (
+  if exist "%N_DIR%%%P" (
     for %%Z in ("%N_DIR%%%P") do if %%~zZ LSS 307200 (
-      ren "%N_DIR%%%P" "%%P.uco-disabled" && echo          - %%P
+      call :quarantine_file "%N_DIR%" "%%P"
     )
   )
+  call :quarantine_file "%N_DIR%" "%%P.uco-disabled"
+)
+goto :eof
+
+rem ------------------------------------------------------------
+rem  :quarantine_file <source directory> <filename>
+rem
+rem  Moves one known competing-loader file outside the game tree. The source
+rem  directory is encoded below the quarantine root so files from different
+rem  nested plugin folders do not collide. Existing backups are never replaced.
+rem ------------------------------------------------------------
+:quarantine_file
+set "Q_SOURCE_DIR=%~1"
+set "Q_NAME=%~2"
+if not defined Q_SOURCE_DIR goto :eof
+if not defined Q_NAME goto :eof
+if not "%Q_SOURCE_DIR:~-1%"=="\" set "Q_SOURCE_DIR=%Q_SOURCE_DIR%\"
+if not exist "%Q_SOURCE_DIR%%Q_NAME%" goto :eof
+
+set "Q_REL=!Q_SOURCE_DIR:%GAME%\=!"
+if /i "!Q_REL!"=="!Q_SOURCE_DIR!" (
+  for %%D in ("!Q_SOURCE_DIR:~0,-1!") do set "Q_REL=external__%%~nxD"
+)
+if not defined Q_REL set "Q_REL=root"
+if "!Q_REL:~-1!"=="\" set "Q_REL=!Q_REL:~0,-1!"
+set "Q_REL=!Q_REL:\=__!"
+set "Q_TARGET_DIR=%QUARANTINE_DIR%\!Q_REL!"
+if not exist "!Q_TARGET_DIR!\" mkdir "!Q_TARGET_DIR!" >nul 2>&1
+if not exist "!Q_TARGET_DIR!\" (
+  echo [ERROR] Could not create quarantine folder for !Q_NAME!
+  goto :eof
+)
+
+set "Q_TARGET=!Q_TARGET_DIR!\!Q_NAME!"
+set /a Q_SUFFIX=1
+:quarantine_find_name
+if not exist "!Q_TARGET!" goto :quarantine_move
+set "Q_TARGET=!Q_TARGET_DIR!\!Q_NAME!.!Q_SUFFIX!"
+set /a Q_SUFFIX+=1
+goto :quarantine_find_name
+
+:quarantine_move
+move /y "%Q_SOURCE_DIR%%Q_NAME%" "!Q_TARGET!" >nul 2>&1
+if errorlevel 1 (
+  echo [ERROR] Could not quarantine !Q_NAME! -- is it in use?
+) else (
+  echo          - !Q_NAME!
 )
 goto :eof
 

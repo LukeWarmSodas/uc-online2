@@ -17,6 +17,7 @@ typedef Il2CppClass*         (*Fn_il2cpp_class_from_name)(const Il2CppImage*, co
 typedef const MethodInfo*    (*Fn_il2cpp_class_get_method_from_name)(Il2CppClass*, const char*, int);
 typedef void                 (*Fn_il2cpp_thread_attach)(Il2CppDomain*);
 typedef void*                (*Fn_il2cpp_string_new)(const char*);
+typedef Il2CppObject*        (*Fn_il2cpp_object_new)(Il2CppClass*);
 typedef Il2CppClass*         (*Fn_il2cpp_object_get_class)(Il2CppObject*);
 typedef Il2CppObject*        (*Fn_il2cpp_value_box)(Il2CppClass*, void*);
 typedef Il2CppObject*        (*Fn_il2cpp_runtime_invoke)(const MethodInfo*, void*, void**, Il2CppObject**);
@@ -38,6 +39,7 @@ static Fn_il2cpp_class_from_name             g_class_from_name             = nul
 static Fn_il2cpp_class_get_method_from_name  g_class_get_method_from_name  = nullptr;
 static Fn_il2cpp_thread_attach               g_thread_attach               = nullptr;
 static Fn_il2cpp_string_new                  g_string_new                  = nullptr;
+static Fn_il2cpp_object_new                  g_object_new                  = nullptr;
 static Fn_il2cpp_object_get_class            g_object_get_class            = nullptr;
 static Fn_il2cpp_value_box                   g_value_box                   = nullptr;
 static Fn_il2cpp_runtime_invoke              g_runtime_invoke              = nullptr;
@@ -73,6 +75,9 @@ bool IL2CPP_TryInit(void)
     RESOLVE(class_get_method_from_name);
     RESOLVE(thread_attach);
     RESOLVE(string_new);
+
+    g_object_new             = (Fn_il2cpp_object_new)
+        GetProcAddress(g_hGameAssembly, "il2cpp_object_new");
 
     // Optional helpers used for dict manipulation + method enum.
     // Don't fail if missing -- callers fall back gracefully.
@@ -228,6 +233,66 @@ void* IL2CPP_StringNew(const char* utf8)
 {
     if (!g_bReady || !g_string_new || !utf8) return nullptr;
     return g_string_new(utf8);
+}
+
+Il2CppObject* IL2CPP_ObjectNew(Il2CppClass* klass)
+{
+    if (!g_bReady || !g_object_new || !klass) return nullptr;
+    return g_object_new(klass);
+}
+
+bool IL2CPP_InvokeVoidOne(Il2CppObject* target, const char* methodName,
+                          Il2CppObject* argument)
+{
+    if (!g_bReady || !target || !methodName || !g_object_get_class ||
+        !g_class_get_method_from_name || !g_runtime_invoke)
+        return false;
+
+    Il2CppClass* klass = g_object_get_class(target);
+    const MethodInfo* method = klass
+        ? g_class_get_method_from_name(klass, methodName, 1) : nullptr;
+    if (!method) return false;
+
+    void* args[1] = { argument };
+    Il2CppObject* exception = nullptr;
+    g_runtime_invoke(method, target, args, &exception);
+    return exception == nullptr;
+}
+
+Il2CppObject* IL2CPP_InvokeObjectOne(Il2CppObject* target,
+                                     const char* methodName,
+                                     Il2CppObject* argument)
+{
+    if (!g_bReady || !target || !methodName || !g_object_get_class ||
+        !g_class_get_method_from_name || !g_runtime_invoke)
+        return nullptr;
+
+    Il2CppClass* klass = g_object_get_class(target);
+    const MethodInfo* method = klass
+        ? g_class_get_method_from_name(klass, methodName, 1) : nullptr;
+    if (!method) return nullptr;
+
+    void* args[1] = { argument };
+    Il2CppObject* exception = nullptr;
+    Il2CppObject* result = g_runtime_invoke(method, target, args, &exception);
+    return exception ? nullptr : result;
+}
+
+Il2CppObject* IL2CPP_InvokeStaticZero(const char* imageName,
+                                      const char* namespaceName,
+                                      const char* className,
+                                      const char* methodName)
+{
+    if (!g_bReady || !className || !methodName || !g_runtime_invoke)
+        return nullptr;
+
+    Il2CppClass* klass = IL2CPP_FindClass(imageName, namespaceName, className);
+    const MethodInfo* method = klass ? IL2CPP_FindMethod(klass, methodName, 0) : nullptr;
+    if (!method) return nullptr;
+
+    Il2CppObject* exception = nullptr;
+    Il2CppObject* result = g_runtime_invoke(method, nullptr, nullptr, &exception);
+    return exception ? nullptr : result;
 }
 
 void IL2CPP_DumpClassMethods(Il2CppClass* klass, const char* classNameForLog)

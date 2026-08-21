@@ -272,39 +272,74 @@ static bool __fastcall Hooked_SendOp(void* pThis, uint8_t op, void* params, void
     return g_pfnOrigSendOp(pThis, op, params, opts, a5, a6);
 }
 
+static bool InstallHook(void* target, void* detour, void** original,
+                        const char* label)
+{
+    if (!target) {
+        LOG("[Realtime] %s method not found", label);
+        return false;
+    }
+
+    MH_STATUS status = MH_CreateHook(target, detour, original);
+    if (status != MH_OK) {
+        LOG("[Realtime] %s hook create failed: %s", label,
+            MH_StatusToString(status));
+        return false;
+    }
+
+    status = MH_EnableHook(target);
+    if (status != MH_OK) {
+        LOG("[Realtime] %s hook enable failed: %s", label,
+            MH_StatusToString(status));
+        MH_RemoveHook(target);
+        return false;
+    }
+
+    LOG("[Realtime] %s hook @ %p", label, target);
+    return true;
+}
+
 static bool TryInstall()
 {
     if (!IL2CPP_IsReady()) return false;
-    // Realtime classes live in Photon.Realtime image. If not found,
-    // this game isn't a PUN/Realtime IL2CPP game.
-    if (!IL2CPP_FindClass("Photon.Realtime", "Photon.Realtime", "LoadBalancingPeer")) return false;
+    // Current PUN builds use PhotonRealtime.dll. The runtime helper still
+    // falls back across all loaded images, which keeps older assembly naming
+    // compatible, but asking for the real image first avoids needless misses.
+    if (!IL2CPP_FindClass("PhotonRealtime", "Photon.Realtime", "LoadBalancingPeer")) {
+        static bool loggedMissingPeer = false;
+        if (!loggedMissingPeer) {
+            LOG("[Realtime] Photon.Realtime.LoadBalancingPeer not available");
+            loggedMissingPeer = true;
+        }
+        return false;
+    }
 
     if (!g_PeerCsInit) { InitializeCriticalSection(&g_PeerCs); g_PeerCsInit = true; }
 
-    void* fn;
-    fn = IL2CPP_FindMethodPtr("Photon.Realtime", "Photon.Realtime", "AuthenticationValues", "set_AuthType", 1);
-    if (fn) {
-        if (MH_CreateHook(fn, (void*)&Hooked_SetAuthType, (void**)&g_pfnOrigSetAuthType) == MH_OK)
-            { MH_EnableHook(fn); LOG("[Realtime] set_AuthType hook @ %p", fn); }
-    }
-    fn = IL2CPP_FindMethodPtr("Photon.Realtime", "Photon.Realtime", "LoadBalancingPeer", "OpAuthenticate", -1);
-    if (fn) {
-        if (MH_CreateHook(fn, (void*)&Hooked_OpAuth, (void**)&g_pfnOrigOpAuth) == MH_OK)
-            { MH_EnableHook(fn); LOG("[Realtime] OpAuthenticate hook @ %p", fn); }
-    }
-    fn = IL2CPP_FindMethodPtr("Photon.Realtime", "Photon.Realtime", "LoadBalancingPeer", "OpAuthenticateOnce", -1);
-    if (fn) {
-        if (MH_CreateHook(fn, (void*)&Hooked_OpAuthOnce, (void**)&g_pfnOrigOpAuthOnce) == MH_OK)
-            { MH_EnableHook(fn); LOG("[Realtime] OpAuthenticateOnce hook @ %p", fn); }
-    }
+    int installed = 0;
+    void* fn = IL2CPP_FindMethodPtr("PhotonRealtime", "Photon.Realtime",
+        "AuthenticationValues", "set_AuthType", 1);
+    if (InstallHook(fn, (void*)&Hooked_SetAuthType,
+        (void**)&g_pfnOrigSetAuthType, "set_AuthType")) ++installed;
+
+    fn = IL2CPP_FindMethodPtr("PhotonRealtime", "Photon.Realtime",
+        "LoadBalancingPeer", "OpAuthenticate", -1);
+    if (InstallHook(fn, (void*)&Hooked_OpAuth,
+        (void**)&g_pfnOrigOpAuth, "OpAuthenticate")) ++installed;
+
+    fn = IL2CPP_FindMethodPtr("PhotonRealtime", "Photon.Realtime",
+        "LoadBalancingPeer", "OpAuthenticateOnce", -1);
+    if (InstallHook(fn, (void*)&Hooked_OpAuthOnce,
+        (void**)&g_pfnOrigOpAuthOnce, "OpAuthenticateOnce")) ++installed;
+
     fn = IL2CPP_FindMethodPtr("Photon3Unity3D", "ExitGames.Client.Photon", "PhotonPeer", "SendOperation", -1);
     if (!fn)
         fn = IL2CPP_FindMethodPtr("Photon3Unity3D", "ExitGames.Client.Photon", "PeerBase", "SendOperation", -1);
-    if (fn) {
-        if (MH_CreateHook(fn, (void*)&Hooked_SendOp, (void**)&g_pfnOrigSendOp) == MH_OK)
-            { MH_EnableHook(fn); LOG("[Realtime] SendOperation hook @ %p", fn); }
-    }
-    LOG("[Realtime] IL2CPP module active");
+    if (InstallHook(fn, (void*)&Hooked_SendOp,
+        (void**)&g_pfnOrigSendOp, "SendOperation")) ++installed;
+
+    if (installed == 0) return false;
+    LOG("[Realtime] IL2CPP module active (%d hooks)", installed);
     return true;
 }
 
