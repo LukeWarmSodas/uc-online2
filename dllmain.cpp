@@ -105,7 +105,20 @@ Fn_BreakpadSetSteamID g_pfnBreakpadSetSteamID = nullptr;
 Fn_BreakpadSetComment g_pfnBreakpadSetComment = nullptr;
 Fn_BreakpadWriteDump g_pfnBreakpadWriteDump = nullptr;
 
-uintp g_CtxCounter = 0;
+// Starts at 1, and must never be 0 again. A game's interface accessor holds a
+// static { pFn, counter, ptr } block that starts life all-zero, and
+// SteamInternal_ContextInit only runs pFn when the block's counter differs from
+// this one. Starting at 0 means a virgin block can compare equal on the very
+// first call, so pFn never runs, ptr stays null, and the accessor hands the game
+// a null interface -- which it then uses without checking. Rivals of Aether
+// (GameMaker, all Steam access through SteamInternal_ContextInit) died exactly
+// that way: a null deref in game code with every interface resolving fine.
+uintp g_CtxCounter = 1;
+
+// See [Settings] SteamClientVersion -- what the exported SteamClient()
+// accessor returns for games built against an older Steamworks SDK.
+ISteamClient* g_pSteamClientLegacy = nullptr;
+char g_LegacyClientVersion[64] = { 0 };
 
 // Forward declarations for SteamStub
 static bool g_bSteamStubEnabled = false;
@@ -119,19 +132,26 @@ S_API void* S_CALLTYPE SteamInternal_ContextInit(void* pData)
 {
 	UCOLOG_HOT("[UCOnline2] SteamInternal_ContextInit");
 	if (!pData) return nullptr;
+	// Diagnostic: the accessor path is invisible in a normal log, so report
+	// the first handful of context blocks and what they ended up holding.
+	static LONG s_diagCount = 0;
+	const bool diag = (InterlockedIncrement(&s_diagCount) <= 24);
+
 	void** pArr = (void**)pData;
 	uintp* pCounter = (uintp*)&pArr[1];
 	char* pBase = (char*)pData;
 	#if defined(_M_IX86)
-		if (*pCounter == g_CtxCounter) return pBase + 8;
+		if (*pCounter != 0 && *pCounter == g_CtxCounter) return pBase + 8;
 		AcquireSRWLockExclusive(&g_CtxLock);
-		if (*pCounter != g_CtxCounter) { void(*pFn)(void*) = (void(*)(void*))pArr[0]; pFn(pBase + 8); *pCounter = g_CtxCounter; }
+		if (*pCounter == 0 || *pCounter != g_CtxCounter) { void(*pFn)(void*) = (void(*)(void*))pArr[0]; pFn(pBase + 8); *pCounter = g_CtxCounter; }
 		ReleaseSRWLockExclusive(&g_CtxLock);
+		if (diag) UCOLOG("[UCOnline2][diag] ContextInit pFn=%p -> iface=%p%s",
+			pArr[0], *(void**)(pBase + 8), *(void**)(pBase + 8) ? "" : "   <<<< NULL");
 		return pBase + 8;
 	#elif defined(_M_AMD64)
-		if (*pCounter == g_CtxCounter) return pBase + 16;
+		if (*pCounter != 0 && *pCounter == g_CtxCounter) return pBase + 16;
 		AcquireSRWLockExclusive(&g_CtxLock);
-		if (*pCounter != g_CtxCounter) { void(*pFn)(void*) = (void(*)(void*))pArr[0]; pFn(pBase + 16); *pCounter = g_CtxCounter; }
+		if (*pCounter == 0 || *pCounter != g_CtxCounter) { void(*pFn)(void*) = (void(*)(void*))pArr[0]; pFn(pBase + 16); *pCounter = g_CtxCounter; }
 		ReleaseSRWLockExclusive(&g_CtxLock);
 		return pBase + 16;
 	#endif
@@ -355,6 +375,12 @@ void* InitSteamClient(HMODULE* phMod, bool bLocal, const char* iface)
 	{
 		UcoInstallSteamClientAuthHooks(*phMod);
 		g_pSteamClientSafe = (ISteamClient*)g_pfnCreateInterface("SteamClient023", nullptr);
+		if (g_LegacyClientVersion[0])
+		{
+			g_pSteamClientLegacy = (ISteamClient*)g_pfnCreateInterface(g_LegacyClientVersion, nullptr);
+			UCOLOG("[UCOnline2] SteamClient() accessor pinned to %s -> %p",
+				g_LegacyClientVersion, g_pSteamClientLegacy);
+		}
 		g_pfnReleaseThreadLocal = (Fn_ReleaseThreadLocal)GetProcAddress(*phMod, "Steam_ReleaseThreadLocalMemory");
 		g_CtxCounter++;
 
@@ -482,11 +508,20 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 				UCOLOG("[UCOnline2] SDR=yes ignored: ogAppId is required");
 		}
 
+		s_PluginLoader.GetClientVersion(g_LegacyClientVersion, sizeof(g_LegacyClientVersion));
+		if (g_LegacyClientVersion[0])
+			UCOLOG("[UCOnline2] SteamClient() accessor will be pinned to %s", g_LegacyClientVersion);
+
 		SetAppIDEnv();
 		WriteAppIDFile();
 
-		// Load the game overlay early to ensure it can hook into graphics APIs
-		LoadGameOverlay();
+		// Load the game overlay early to ensure it can hook into graphics APIs.
+		// [Settings] LoadOverlay=no opts out: the renderer hooks D3D/DXGI, and a
+		// game that objects to that has no other way to keep it out.
+		if (s_PluginLoader.GetLoadOverlay())
+			LoadGameOverlay();
+		else
+			UCOLOG("[UCOnline2] LoadOverlay=no -- not loading GameOverlayRenderer");
 
 		char dllPath[MAX_PATH] = { 0 };
 		DWORD len = GetModuleFileNameA(hModule, dllPath, sizeof(dllPath));

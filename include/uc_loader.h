@@ -209,6 +209,50 @@ uint32 GetOgAppId()
 		return IniReadBool("WarnOverlayDisabled", false);
 	}
 
+	// [Settings] Client pins what the exported SteamClient() accessor hands
+	// back, written as just the version number:  Client=017
+	//
+	// A game built against an old SDK calls that accessor and then indexes the
+	// returned vtable using the offsets from ITS headers. Hand such a caller a
+	// modern SteamClient023 and every getter lands on the wrong slot: Rivals of
+	// Aether asked for GetISteamUGC, got something else, stored the result
+	// without checking, and died dereferencing it later.
+	//
+	// Empty (the default) keeps the modern interface, which is right for
+	// everything else. "017" and "SteamClient017" are both accepted.
+	void GetClientVersion(char* out, size_t cch) const
+	{
+		if (cch) out[0] = '\0';
+		if (m_IniPath[0] == '\0') return;
+
+		char raw[64] = { 0 };
+		IniReadString("Client", "", raw, sizeof(raw));
+		if (raw[0] == '\0') return;
+
+		// Bare digits are the documented form; expand them to the real name.
+		bool digitsOnly = true;
+		for (const char* c = raw; *c; ++c)
+			if (*c < '0' || *c > '9') { digitsOnly = false; break; }
+
+		if (digitsOnly)
+			_snprintf_s(out, cch, _TRUNCATE, "SteamClient%s", raw);
+		else
+			strncpy_s(out, cch, raw, _TRUNCATE);
+	}
+
+	// [Settings] LoadOverlay=no stops UCOnline2 pulling Steam's
+	// GameOverlayRenderer into the process. Normally that load is what gives a
+	// directly-launched game its overlay, but the renderer hooks D3D/DXGI, and a
+	// game that dislikes being hooked that early has no other way to opt out.
+	// Default on, because for most titles it is the whole point.
+	bool GetLoadOverlay()
+	{
+		if (m_IniPath[0] == '\0')
+			return true;
+
+		return IniReadBool("LoadOverlay", true);
+	}
+
 	// This does not need to be set!! It will automatically run as true!!
 	bool GetForceOwnership()
 	{

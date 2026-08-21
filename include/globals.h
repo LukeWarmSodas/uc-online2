@@ -646,6 +646,8 @@ typedef void (S_CALLTYPE* Fn_BreakpadWriteDump)(uint32 Code, void* Info, uint32 
 extern Fn_BreakpadWriteDump g_pfnBreakpadWriteDump;
 
 extern uintp g_CtxCounter;
+extern ISteamClient* g_pSteamClientLegacy;
+extern char g_LegacyClientVersion[64];
 
 void UCOLOG(const char* fmt, ...);
 void UCOColor(WORD color, const char* text);

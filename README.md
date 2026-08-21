@@ -137,6 +137,41 @@ UnlockDLC=123,456,789 # Legacy DLC list; prefer the [DLC] section below
 EmulateTicket=true  # Enable ticket emulation using ogAppId or AppId
 ```
 
+### `Client` — for games built on an old Steamworks SDK
+
+```ini
+[Settings]
+Client=017
+```
+
+Some older games don't ask for interfaces by name at all: they call the
+exported `SteamClient()` accessor and then walk the returned vtable using the
+offsets from the SDK **they** were compiled against. UCOnline2 normally hands
+back a modern `SteamClient023`, and for such a game every getter then lands on
+the wrong slot — it stores whatever comes back and crashes later when it uses
+it.
+
+`Client=017` pins what that accessor returns, so the vtable matches what the
+game expects. UCOnline2 keeps using the modern interface internally, so nothing
+else changes. Leave it unset unless you need it.
+
+**Rivals of Aether** needs `Client=017`: without it the game dies during
+startup with an access violation reading address 0, inside its own code, after
+`GetISteamUGC` came back wrong. The tell is a crash a few seconds in, with
+nothing obviously failing in the log.
+
+### `LoadOverlay` — keep the Steam overlay out
+
+```ini
+[Settings]
+LoadOverlay=no
+```
+
+UCOnline2 pulls Steam's `GameOverlayRenderer` into the process so a
+directly-launched game still gets the overlay. That renderer hooks D3D/DXGI
+early, and a game that objects to being hooked has no other way to opt out.
+Set this to `no` to skip the load. You lose the overlay, nothing else.
+
 Games that use Steam Datagram Relay may need UCO2 to create the real Steam
 networking context before switching back to the spoofed AppId:
 
