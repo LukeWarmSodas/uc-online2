@@ -6,7 +6,17 @@ Custom modified Steam API .dll for Steam games to spoof your game as Spacewar. D
 > — what's confirmed, on which backend (Steam / EOS / Photon / coherence / …), and
 > how each build is fixed. It's community-maintained and grows as games are tested.
 
-## Quick start — `patch.bat`
+**Contents**
+
+- [Quick start](#quick-start) · [Manual install](#manual-install)
+- [Configuration](#configuration) — [settings reference](#settings-reference), [DLC](#dlc), [ticket emulation](#ticket-emulation), [old-SDK games](#old-sdk-games-client), [SDR](#steam-datagram-relay-sdr), [overlay](#overlay), [SteamStub](#steamstub)
+- [Plugins](#plugins) — [loader](#plugin-loader), [ABI](#plugin-abi-v1), [coherence shortcut](#coherence-games-the-easy-route)
+- [Troubleshooting](#troubleshooting) — [won't launch](#the-game-wont-launch-or-acts-like-steam-isnt-running), [multiplayer won't connect](#multiplayer-wont-connect), [what this cannot fix](#what-this-cannot-fix)
+- [Building](#building) · [Forking](#forking--modifications) · [Known issues](#known-issues)
+
+---
+
+## Quick start
 
 **Drag your game folder onto `patch.bat`.** It works out what the game needs and
 does the whole setup, which for most games is everything you have to do.
@@ -24,35 +34,12 @@ It will:
   plugin, and prompt for whatever app IDs that backend needs
 
 Everything third-party stays yours: it never invents a Photon GUID, an Epic app
-or a coherence project. Press Enter at any prompt to skip it and a stub is
-written for you to fill in later.
+or a coherence project.
 
 ```
 patch.bat "C:\Games\SomeGame"            full setup
 patch.bat "C:\Games\SomeGame" /keyonly   coherence runtime key only, nothing else
 ```
-
-### coherence games: the easy route
-
-A coherence game has to point at a coherence project that has its schema
-uploaded. Setting that up yourself means an account, the Unity editor and a
-schema upload — so patch.bat offers a shortcut.
-
-**Answer `SHARED` at the runtime-key prompt.** That points the game at a
-community project which already has the schema uploaded and every region
-enabled: no account, no Unity, nothing else to do.
-
-It is a free tier, unmonitored, and shared with everyone else using it, so
-**availability is not guaranteed** — it may be rate-limited or rotated without
-notice, and everyone on it sees everyone else's lobbies. If co-op stops working,
-suspect that first and set up your own project with
-[`tools/coherence_schema`](tools/coherence_schema/README.md).
-
-`/keyonly` changes which project a game points at and nothing else — handy for
-switching between your own project and the shared one without disturbing a
-working install. It does **not** deploy the emulator or the plugin, so for a
-fresh install do a normal full run and answer `SHARED` there instead. Running it
-twice is safe; the second run reports the key already matches.
 
 **What it will not do:**
 
@@ -67,126 +54,83 @@ If it reports **no secondary backend**, try the game with no plugin at all —
 titles whose multiplayer is purely Steam lobbies and P2P work through
 passthrough unmodified.
 
-Steam still has to be running, at the same elevation as the game — see
-[Administrator / elevation](#administrator--elevation).
+Steam has to be running, at the same elevation as the game — see
+[the game won't launch](#the-game-wont-launch-or-acts-like-steam-isnt-running).
 
-## Usage (manual)
+## Manual install
 
-__**If using downloaded .dlls from [Releases](https://github.com/LukeWarmSodas/uc-online2/releases):**__
-- 1. Extract the archive downloaded from the __**LATEST**__ release.
-- 2. Copy the corresponding .dll to replace your original .dll.
-   - 2a. Rename the original .dll before copying it to something else if you feel you must back it up, something like ``steam_api_o.dll`` as Goldberg Emu suggests or ``steam_api64.dll.old``. (It doesn't matter as long as it is just changed.)
-- 3. Make sure Steam is running first. Then try running the game as you normally would from the .exe. If it has SteamStub, use Steamless to remove it or use the .dll made to bypass it for games that Steamless cannot unpack. (Dave the Diver is an example.)
-   - 3a. If it throws an error related to auth failure, restart Steam and try again. If the error persists, contact me. I'll work with you to figure it out one way or another. 
-   - 3b. If the game won't launch at all, see [Administrator / elevation](#administrator--elevation) — Steam and the game have to run at the same elevation. If the game needs admin, run Steam as admin too.
+**From a [release](https://github.com/LukeWarmSodas/uc-online2/releases):**
 
-__**If using self built .dlls:**__
-- 1. Run `build.bat` or open `uc_online2.vcxproj` in Visual Studio.
-- 2. Copy the output .dll to your game folder:
-   - **32-bit:** `build\x86\steam_api.dll`
-   - **64-bit:** `build\x64\steam_api64.dll`
-- 3. Replace your `steam_api(64).dll` with one from here. Back it up if necessary by renaming it to `steam_api(64)_o.dll`.
+1. Extract the archive from the **latest** release.
+2. Back up the game's original DLL by renaming it (`steam_api64.dll.bak`, or
+   `steam_api_o.dll` as Goldberg suggests — the name doesn't matter).
+3. Copy ours in its place: `x86\steam_api.dll` for 32-bit games,
+   `x64\steam_api64.dll` for 64-bit.
+4. Make sure Steam is running, then launch the game from its .exe as usual.
 
-## Administrator / elevation
+If the game has **SteamStub**, either unpack it with Steamless or set
+[`GetStubbedLol`](#steamstub).
 
-UCOnline2 is a **passthrough** — the real Steam client has to be running, and the game talks to it over Steam's IPC. That IPC is sensitive to Windows integrity levels, so **run Steam and the game at the same elevation.**
+**From your own build:** see [Building](#building), then copy
+`relbuild\x86\steam_api.dll` or `relbuild\x64\steam_api64.dll` the same way.
 
-**What matters is that they match** — either is fine as long as both are the same:
-
-| Steam | Game | Result |
-|---|---|---|
-| normal | normal | ✅ works — the usual setup |
-| **admin** | **admin** | ✅ works — use this when the game needs admin |
-| normal | admin | ✅ Most of the time works |
-| admin | normal | ❌ Won't work since game can't hook into steam |
-
-A mismatch typically looks like the game refusing to start at all, an init/auth failure, or the game behaving as though Steam isn't running.
-
-**Some games genuinely require admin.** Those aren't broken — you just have to bring Steam up to match:
-
-1. Fully exit Steam (tray icon → Exit — not just closing the window).
-2. Right-click `steam.exe` → **Run as administrator**, and let it finish signing in.
-3. Launch the game as admin as usual.
-
-If a game *doesn't* need admin, leave both normal; it's the simpler setup and there's nothing to gain from elevating.
-
-Two things that catch people out:
-
-- Windows silently elevates a child process when its parent is elevated — launching the game from an elevated launcher, script, or terminal elevates the game too, even with every compatibility checkbox clear.
-- Closing Steam's window only hides it to the tray. If you're switching Steam's elevation you have to actually **Exit** it first, or you'll just reattach to the still-running non-elevated instance.
+---
 
 ## Configuration
 
-Create `union-crax.ini` next to the game executable to change your AppId as needed. If this file is missing, AppId defaults to `480` and plugins are not loaded. `PluginsFolder` is relative to the game executable or wherever it's set in the .ini. Or should be. I haven't tested it yet. Check the `steam_appid.txt` file that gets created upon running the game to check if your set AppId was accepted. For games that have `480` patched in
-
-Set `WarnOverlayDisabled=true` to log a startup warning when the Steam overlay
-looks like it will not work. Treat it as a hint, not a verdict: the overlay does
-work for directly-launched games, but a few titles never show it regardless.
-the game's code, try setting it to something else free that's multiplayer, like `440`
-(Team Fortress 2). Shapes of Dreams did not work using `480`, but worked fine with `440`.
-((THANK YOU to deityofsukana for helping figure that out for certain!!!))
+Create `union-crax.ini` **next to the game executable**. Without it, AppId
+defaults to `480` and no plugins load. `PluginsFolder` is relative to that same
+place. Check the `steam_appid.txt` written on launch to confirm your AppId was
+accepted.
 
 ```ini
 [Settings]
 AppId=480
-ogAppId=220 # Half-life 2
+ogAppId=220              # Half-Life 2 — the game's REAL AppId
 PluginsFolder=plugins
 GetStubbedLol=false
-LogOverlay=no
-UnlockDLC=123,456,789 # Legacy DLC list; prefer the [DLC] section below
-EmulateTicket=true  # Enable ticket emulation using ogAppId or AppId
+EmulateTicket=true
 ```
 
-### `Client` — for games built on an old Steamworks SDK
+Some games have `480` hard-coded in their own code. If yours misbehaves on
+Spacewar, try another free multiplayer AppId such as `440` (Team Fortress 2) —
+Shapes of Dreams did not work on `480` but was fine on `440`.
+*(Thanks to deityofsukana for pinning that down.)*
 
-```ini
-[Settings]
-Client=017
-```
+### What `ogAppId` is for
 
-Some older games don't ask for interfaces by name at all: they call the
-exported `SteamClient()` accessor and then walk the returned vtable using the
-offsets from the SDK **they** were compiled against. UCOnline2 normally hands
-back a modern `SteamClient023`, and for such a game every getter then lands on
-the wrong slot — it stores whatever comes back and crashes later when it uses
-it.
+This lets the overlay use the right game assets even though you are ostensibly
+running Spacewar. The AppId you set here is converted to the 64-bit Game ID
+string Steam expects and used for the `SteamOverlayGameId` environment variable.
+You could pass that as a launch argument yourself, but you would need to know the
+long numeric form — this just makes it easier.
 
-`Client=017` pins what that accessor returns, so the vtable matches what the
-game expects. UCOnline2 keeps using the modern interface internally, so nothing
-else changes. Leave it unset unless you need it.
+`SteamGameId` is deliberately **not** touched by `ogAppId`, because changing it
+causes problems; that one follows `AppId` (also converted to the 64-bit form).
 
-**Rivals of Aether** needs `Client=017`: without it the game dies during
-startup with an access violation reading address 0, inside its own code, after
-`GetISteamUGC` came back wrong. The tell is a crash a few seconds in, with
-nothing obviously failing in the log.
+`ogAppId` is also what DLC, ticket emulation and the stats fix answer *as*, so
+set it for any game where you care about those.
 
-### `LoadOverlay` — keep the Steam overlay out
+### Settings reference
 
-```ini
-[Settings]
-LoadOverlay=no
-```
+All keys live under `[Settings]` unless noted.
 
-UCOnline2 pulls Steam's `GameOverlayRenderer` into the process so a
-directly-launched game still gets the overlay. That renderer hooks D3D/DXGI
-early, and a game that objects to being hooked has no other way to opt out.
-Set this to `no` to skip the load. You lose the overlay, nothing else.
+| Key | Default | What it does |
+|---|---|---|
+| `AppId` | `480` | The AppId Steam sees. Spacewar unless the game objects. |
+| `ogAppId` | *(none)* | The game's real AppId. Used for the overlay, DLC, tickets and stats. |
+| `PluginsFolder` | *(none)* | Folder of `.dll` plugins to load, relative to the exe. |
+| `EmulateTicket` | `false` | [Ticket emulation](#ticket-emulation) for peer-validated multiplayer. |
+| `Client` | *(none)* | Pin the `SteamClient()` version for [old-SDK games](#old-sdk-games-client), e.g. `017`. |
+| `SDR` | `false` | [Steam Datagram Relay](#steam-datagram-relay-sdr) split context. Requires `ogAppId`. |
+| `GetStubbedLol` | `false` | Patch [SteamStub](#steamstub) at runtime instead of unpacking. |
+| `LoadOverlay` | `true` | Set `no` to keep Steam's overlay renderer [out of the process](#overlay). |
+| `LogOverlay` | `no` | Write `steam_overlay.log` from the early overlay proxy. |
+| `WarnOverlayDisabled` | `false` | Log a startup hint when the overlay looks like it won't work. |
+| `UnlockDLC` | *(none)* | Legacy comma-separated DLC list; prefer the [`[DLC]`](#dlc) section. |
+| `VerboseLog` | `false` | Per-frame callback traces. Very noisy — for debugging only. |
 
-Games that use Steam Datagram Relay may need UCO2 to create the real Steam
-networking context before switching back to the spoofed AppId:
-
-```ini
-[Settings]
-AppId=480
-ogAppId=<the game's real Steam AppId>
-SDR=yes
-```
-
-`SDR=yes` requires `ogAppId`. It uses the older `SteamClient017` connection path
-for compatibility, then exposes the current Steam interfaces to the game. Leave
-it disabled unless the game uses Steam Networking Sockets/SDR.
-
-## Unlock DLC
+### DLC
 
 Games ask about DLC in two different ways, and both have to be answered:
 
@@ -196,8 +140,6 @@ Games ask about DLC in two different ways, and both have to be answered:
 The second kind is why unlocking used to look unreliable: a game that checks ids it
 already knows worked, while a game that builds its DLC menu by *enumerating* saw
 nothing, because real Steam answers for the spoofed AppId and reports no DLC.
-
-Use the `[DLC]` section:
 
 ```ini
 [DLC]
@@ -229,16 +171,27 @@ To check what was picked up, look in `%TEMP%/uc_online2.log` for:
 [UCOnline2] ISteamApps DLC hooks: 5/5 installed (UnlockAll=1, 2 configured DLC)
 ```
 
-## Emulate Encrypted App Ticket
+> DLC hooks are skipped when [`Client`](#old-sdk-games-client) is set — an old-SDK
+> game uses an older `ISteamApps` whose vtable doesn't match the one we hook, and
+> forcing it there crashes the game.
 
-The `EmulateTicket` setting covers **both** kinds of Steam ticket a game may ask for:
+### Ticket emulation
+
+`EmulateTicket` covers **both** kinds of Steam ticket a game may ask for:
 
 - **Encrypted app ticket** — `GetEncryptedAppTicket` / `RequestEncryptedAppTicket`, plus `UserHasLicenseForApp` ownership checks, answered for `ogAppId` (or `AppId` if unset).
-- **Auth session ticket** — `GetAuthSessionTicket`, plus the legacy `InitiateGameConnection` client/server handshake used by older Steam integrations. Previously these passed straight through to real Steam, which mints the ticket under the *spoofed* AppId, so the host rejected it. The tell in the log is the game registering callback `163` (`GetAuthSessionTicketResponse_t`) repeatedly: asking for a ticket, never getting a usable one, retrying.
+- **Auth session ticket** — `GetAuthSessionTicket`, plus the legacy `InitiateGameConnection` client/server handshake used by older Steam integrations. Passed straight through, real Steam mints the ticket under the *spoofed* AppId, so the host rejects it. The tell in the log is the game registering callback `163` (`GetAuthSessionTicketResponse_t`) repeatedly: asking for a ticket, never getting a usable one, retrying.
 
 `BeginAuthSession` / `EndAuthSession` / `CancelAuthTicket` are emulated to match, and the response callbacks (`GetAuthSessionTicketResponse_t`, `ValidateAuthTicketResponse_t`) are delivered — a game that *waits* on those would otherwise hang even with a valid-looking ticket.
 
-This works because the check is **peer-side**: both players run the emulator, so one mints the ticket and the other accepts it. It does **not** help where a publisher's own server asks Steam to validate the ticket — that is server-side and unforgeable, no matter what the client does.
+This works because the check is **peer-side**: both players run the emulator, so one mints the ticket and the other accepts it. It does **not** help where a publisher's own server asks Steam to validate the ticket — see [what this cannot fix](#what-this-cannot-fix).
+
+```ini
+[Settings]
+AppId=480
+ogAppId=440              # tickets are emulated for this
+EmulateTicket=true
+```
 
 Look for this in `%TEMP%/uc_online2.log`:
 
@@ -248,18 +201,237 @@ Look for this in `%TEMP%/uc_online2.log`:
 [UCOnline2] BeginAuthSession emulated -> OK for 7656119... (64 byte ticket)
 ```
 
-I really didn't know how to actually go about this, sorry - I used AI to try and finish what I had gotten through with it. I don't know how OFME utilizes it, but I can assume it actually is a ticket emulation system which is what I tried to make. But, I don't want it to _not_ work due to it being emulated, or too emulated, if this makes sense at all. I don't want to deviate too much and have this not work at all.
-Speaking of which, I can't say for certain if this function would actually work or not, I will rely on the community to find out about that from testing for me. Sorry to throw that on y'all like this. ^^;
+> I really didn't know how to actually go about this, sorry — I used AI to try and
+> finish what I had gotten through with it. I don't know how OFME utilizes it, but I
+> can assume it actually is a ticket emulation system, which is what I tried to make.
+> I can't say for certain whether it works in every case, so I'll rely on the
+> community to find out from testing. Sorry to throw that on y'all. ^^;
 
-Example:
+### Old-SDK games (`Client`)
+
+```ini
+[Settings]
+Client=017
+```
+
+Some older games don't ask for interfaces by name at all: they call the exported
+`SteamClient()` accessor and then walk the returned vtable using the offsets from
+the SDK **they** were compiled against. UCOnline2 normally hands back a modern
+`SteamClient023`, so every getter lands on the wrong slot — the game stores
+whatever comes back and crashes later when it uses it.
+
+`Client=017` pins what that accessor returns, so the vtable matches what the game
+expects. UCOnline2 keeps using the modern interface internally. Both `017` and
+`SteamClient017` are accepted. Leave it unset unless you need it.
+
+**Rivals of Aether** needs `Client=017`. Without it the game dies a few seconds
+into startup with an access violation reading address 0, inside its own code,
+with nothing obviously failing in the log.
+
+Old-SDK games tend to need more than the pin, and UCOnline2 handles the rest
+automatically once `Client` is set: pre-018 `SteamClient` requests pass through to
+real Steam (so a game's own extension DLL can link), stats callbacks get their
+game id rewritten to `ogAppId`, and the DLC hooks are skipped.
+
+### Steam Datagram Relay (SDR)
+
+Games that use SDR may need UCOnline2 to create the real Steam networking context
+before switching back to the spoofed AppId:
+
 ```ini
 [Settings]
 AppId=480
-ogAppId=440  # Used for ticket emulation (falls back to AppId if not set)
-EmulateTicket=true
+ogAppId=<the game's real Steam AppId>
+SDR=yes
 ```
 
-## What this cannot fix
+`SDR=yes` requires `ogAppId`. It uses the older `SteamClient017` connection path
+for compatibility, then exposes the current Steam interfaces to the game. Leave it
+disabled unless the game uses Steam Networking Sockets / SDR — it stamps the real
+AppId into the networking context, which fails for accounts that don't own the game.
+
+### Overlay
+
+UCOnline2 pulls Steam's `GameOverlayRenderer` into the process so a
+directly-launched game still gets the overlay. `patch.bat` additionally deploys an
+early proxy (`version.dll` / `XINPUT1_3.dll`) for engines that load
+`steam_api64.dll` too late for the overlay to hook the swapchain — see
+[`plugins/steam_overlay`](plugins/steam_overlay/README.md).
+
+```ini
+[Settings]
+LoadOverlay=no           # skip loading the overlay renderer entirely
+LogOverlay=yes           # write steam_overlay.log next to the exe
+WarnOverlayDisabled=true # log a hint at startup if the overlay looks unavailable
+```
+
+The renderer hooks D3D/DXGI early, and a game that objects to that has no other
+way to opt out — `LoadOverlay=no` is that escape hatch. You lose the overlay,
+nothing else.
+
+Treat `WarnOverlayDisabled` as a hint, not a verdict: the overlay does work for
+directly-launched games, but a few titles never show it regardless.
+
+### SteamStub
+
+If `GetStubbedLol` is enabled, UCOnline2 patches SteamStub on the fly. This is
+meant for games Steamless cannot unpack, such as Dave the Diver. It can also be
+used to avoid modifying the game files at all. If it's disabled, the function is
+ignored entirely and everything continues as though it were never implemented.
+
+I'm not responsible for the original code — it came from DenuvoSanctuary's Rust
+implementation, [found here](https://github.com/denuvosanctuary/steamstubbed). I
+rewrote it in C++ so I could integrate it into this project rather than injecting
+it. I did not ask for permission, so if there's an issue with that, contact me and
+I'll remove it or work something out.
+
+---
+
+## Plugins
+
+### Plugin loader
+
+If `PluginsFolder` is set, all `.dll` files in that folder load at startup in
+alphabetical order. Use prefixes to control load order:
+
+```
+plugins/
+  01_first_plugin.dll
+  02_second_plugin.dll
+  03_another_one_(dj_khaled!!).dll
+```
+
+### Plugin ABI (v1)
+
+Plugins that want to integrate with UCOnline2 (rather than just running DllMain side effects) can export two C functions defined in [`include/uco_plugin.h`](include/uco_plugin.h):
+
+```c
+__declspec(dllexport) int  UCO_PluginInit(const UCO_PluginContext* ctx);
+__declspec(dllexport) void UCO_PluginShutdown(void);
+```
+
+- `UCO_PluginInit` is called once after `SteamAPI_Init` succeeds. The context exposes the resolved `ISteam*` interfaces, the configured AppId / ogAppId, a logger, and a callback-patcher registration function. Return 0 for success.
+- `UCO_PluginShutdown` is called on detach (in reverse load order). Use it to disable MinHook hooks and clean up.
+
+**What lives in core vs in a plugin.** Core (`steam_api64.dll`) only ships generic
+Steam-side spoofing — `ISteamUtils::GetAppID` and `ISteamApps::BIsSubscribedApp`
+are vtable-hooked to report `ogAppId`, so games that ask "what AppId am I, and do
+I own it?" get a consistent answer.
+
+Anything game-specific — ticket synthesis, `BeginAuthSession` bypass, EOSSDK
+hooks, custom networking, IL2CPP patches — belongs in a plugin.
+
+### coherence games: the easy route
+
+A coherence game has to point at a coherence project that has its schema
+uploaded. Setting that up yourself means an account, the Unity editor and a
+schema upload — so patch.bat offers a shortcut.
+
+**Answer `SHARED` at the runtime-key prompt.** That points the game at a
+community project which already has the schema uploaded and every region
+enabled: no account, no Unity, nothing else to do.
+
+It is a free tier, unmonitored, and shared with everyone else using it, so
+**availability is not guaranteed** — it may be rate-limited or rotated without
+notice, and everyone on it sees everyone else's lobbies. If co-op stops working,
+suspect that first and set up your own project with
+[`tools/coherence_schema`](tools/coherence_schema/README.md).
+
+`/keyonly` changes which project a game points at and nothing else — handy for
+switching between your own project and the shared one without disturbing a
+working install. It does **not** deploy the emulator or the plugin, so for a
+fresh install do a normal full run and answer `SHARED` there instead. Running it
+twice is safe; the second run reports the key already matches.
+
+---
+
+## Troubleshooting
+
+### The game won't launch, or acts like Steam isn't running
+
+**Check elevation first.** UCOnline2 is a **passthrough** — the real Steam client
+has to be running, and the game talks to it over Steam's IPC. That IPC is
+sensitive to Windows integrity levels, so **run Steam and the game at the same
+elevation.**
+
+| Steam | Game | Result |
+|---|---|---|
+| normal | normal | ✅ works — the usual setup |
+| **admin** | **admin** | ✅ works — use this when the game needs admin |
+| normal | admin | ✅ usually works |
+| admin | normal | ❌ won't work — the game can't reach Steam |
+
+A mismatch typically looks like the game refusing to start at all, an init/auth
+failure, or the game behaving as though Steam isn't running.
+
+**Some games genuinely require admin.** Those aren't broken — bring Steam up to
+match:
+
+1. Fully exit Steam (tray icon → Exit — not just closing the window).
+2. Right-click `steam.exe` → **Run as administrator**, let it finish signing in.
+3. Launch the game as admin as usual.
+
+If a game *doesn't* need admin, leave both normal.
+
+Two things that catch people out:
+
+- Windows silently elevates a child process when its parent is elevated — launching the game from an elevated launcher, script, or terminal elevates the game too, even with every compatibility checkbox clear.
+- Closing Steam's window only hides it to the tray. If you're switching Steam's elevation you have to actually **Exit** it first, or you'll just reattach to the still-running non-elevated instance.
+
+If the game throws an auth error, restart Steam and try again.
+
+### Multiplayer won't connect
+
+If the game launches and everything looks healthy but you can't join anyone,
+work through these in order.
+
+**1. Are you both on UCOnline2?** You share AppId `480`'s lobby pool, so someone
+on a legitimate copy is in a different pool entirely and will never see your
+lobbies. Both sides need the same setup, and the same game version.
+
+**2. Do your backend IDs match exactly?** For Photon, PlayFab, EOS or coherence,
+everyone must use the **same** app/title/project id. Two valid-but-different ids
+fail silently: everything initialises, nobody finds anybody.
+
+**3. Check the log for the real error.** `%TEMP%/uc_online2.log` will show whether
+the backend actually authenticated. If it did, and you still can't connect, the
+problem is the network path — read on.
+
+**4. Your connection may be blocking peer-to-peer traffic.** This one is worth
+knowing about because it looks *exactly* like a broken fix:
+
+- the game launches fine, no errors anywhere
+- the backend logs in (you can see yourself in the PlayFab/Photon dashboard)
+- you can **see** the host, click join, get "connecting…", then lose the connection
+- **someone else on the identical setup connects without trouble**
+
+Multiplayer backends carry the actual session over **UDP relays** (Valve's SDR,
+PlayFab Party over Azure, Photon's relays). Logging in is plain HTTPS and works
+almost anywhere; the session transport is what gets blocked. Causes, cheapest
+first:
+
+- **Windows Firewall** — allow the game on **both** Private and Public profiles
+- **Antivirus with network/web protection** — several filter UDP; test with it off
+- **Mobile data or a phone hotspot** — carrier-grade NAT, very often fatal to P2P
+- **ISP-level filtering** — some countries interfere with P2P, VoIP and relay
+  traffic wholesale. This is real and it is not something the emulator can fix.
+
+**Confirming it isn't us:** try **Steam Remote Play Together** with the same
+person. It rides the same relay network and involves none of this project's code.
+If that fails too, the problem is your network path.
+
+**The fix is to tunnel out.** Start with **[Cloudflare WARP](https://one.one.one.one/)**
+— it's free, takes five minutes, and has resolved this in practice (a user who
+could not join anyone was able to join immediately over WARP). If WARP doesn't
+help, a **full-tunnel VPN** is the next step; note that a split tunnel or a
+browser-only proxy will *not* carry the UDP that's actually broken. In countries
+where commercial VPNs are themselves blocked, a self-hosted WireGuard server on a
+cheap VPS tends to survive, since it isn't a published provider IP range.
+
+None of this is a UCOnline2 problem, and the compatibility list should not record
+a game as broken because of it.
+
+### What this cannot fix
 
 Some games are out of reach no matter what the emulator does, and it is worth
 knowing the shape of that before spending an evening on one.
@@ -292,77 +464,38 @@ to a machine you do not control, the answer is no.
 Steam lobbies plus P2P, or where the host itself validates the joining player, are
 the normal case and are what this project is for.
 
-## Plugin Loader / Injector
-
-If `PluginsFolder` is set in the .ini file, all `.dll` files in that folder are loaded at startup in alphabetical order. Use prefixes to control load order:
-
-```
-plugins/
-  01_first_plugin.dll
-  02_second_plugin.dll
-  03_another_one_(dj_khaled!!).dll
-```
-
-### Plugin ABI (v1)
-
-Plugins that want to integrate with UCOnline2 (rather than just running DllMain side effects) can export two C functions defined in [`include/uco_plugin.h`](include/uco_plugin.h):
-
-```c
-__declspec(dllexport) int  UCO_PluginInit(const UCO_PluginContext* ctx);
-__declspec(dllexport) void UCO_PluginShutdown(void);
-```
-
-- `UCO_PluginInit` is called once after `SteamAPI_Init` succeeds. The context exposes the resolved `ISteam*` interfaces, the configured AppId / ogAppId, a logger, and a callback-patcher registration function. Return 0 for success.
-- `UCO_PluginShutdown` is called on detach (in reverse load order). Use it to disable MinHook hooks and clean up.
-
-#### What lives in core vs in a plugin
-
-Core (`steam_api64.dll`) only ships generic Steam-side spoofing:
-- `ISteamUtils::GetAppID` and `ISteamApps::BIsSubscribedApp` are vtable-hooked to report `ogAppId` so games that ask "what AppId am I, and do I own it?" get a consistent answer.
-
-Anything game-specific — ticket synthesis, `BeginAuthSession` bypass, EOSSDK hooks, custom networking, IL2CPP patches — belongs in a plugin.
-
-## SteamStubbed
-
-If `GetStubbedLol` is enabled in the .ini file, it will attempt to patch SteamStub on the fly. This is meant for games that Steamless cannot unpack, such as Dave the Diver. However, it can be used to keep from modifying the game files at all, or as little as possible. I'm not responsible for the code, it was used from DenuvoSanctuary's original Rust code, [which can be found here](https://github.com/denuvosanctuary/steamstubbed). I
-rewrote it in C++ so I could try integrating it into this project and not need to inject it. I did not ask for permission to use it in any way, so if there are any issues with that, please contact me and I'll remove it or work something out. It's not much of a change anyways, and they're easy to find too.
-
-If the function is disabled, or was never written in the first place, then it simply 
-will just ignore the function entirely and continue as it wassn't implemented in the
-first place.
-
-## "ogAppId"
-
-This is an attempt to allow the overlay to force use the right game assets even when you very clearly are supposedly running Spacewar. Setting the original AppId here just gets calculated to the 64-bit Game ID string it expects (which I just learned about too...) and is used for the `SteamOverlayGameId` environment variable which could easily be run as a launch arg, but requires you knowing the long string of numbers for your game, so this just makes it way easier to set up. `SteamGameId` is not touched at all by this, as it can cause problems. It uses the `AppId` for that, except it also gets converted to the expected 64-bit Game ID string.
+---
 
 ## Building
 
-__**Quick way (true Chad way - quick, simple, and easy):**__
-- 1. Run `build.bat`.
-- 2. ???
-- 3. Profit.
+**Quick way (true Chad way — quick, simple, and easy):**
 
-__**With Visual Studio (the bum way - requires too much effort):**__
-- 1. Open `uc_online2.vcxproj`.
-- 2. Select Release | Win32 or Release | x64.
-- 3. Build.
+1. Run `build.bat`.
+2. ???
+3. Profit.
 
-Requires Visual Studio 2022 with C / C++ Environment selected (v143 or higher toolset). If MSBuild is not found, `build.bat` will tell you where to get it. The `build.bat` script has a preset path that applies to my personal setup and if it doesn't match yours, you will need to modify it. Otherwise, you'll consistently error out even when you have everything installed. 
+**With Visual Studio (the bum way — requires too much effort):**
 
-## Forking / Modifications 
+1. Open `uc_online2.vcxproj`.
+2. Select Release | Win32 or Release | x64.
+3. Build.
 
-Okay, so this part I did not cover as of publishing the source files, this will cover personal modifications and forks as well as modifications to this.
+Requires Visual Studio 2022 with the C/C++ environment (v143 or higher toolset).
+If MSBuild isn't found, `build.bat` will tell you where to get it. That script has
+a preset path matching my personal setup — if it doesn't match yours you'll need
+to edit it, or you'll error out even with everything installed.
+
+## Forking / Modifications
 
 - Please feel free to fork this and modify it however you see fit, and if you feel it would benefit the original repo, make a PR and I'll look into it.
-- You are allowed to modify this and distribute it to your liking, all I ask is that I'm made aware of this. Read the license for more info. 
+- You are allowed to modify this and distribute it to your liking, all I ask is that I'm made aware of this. Read the license for more info.
    - I only want this so I can be certain that it's not being distributed as a method to spread malware. (I should make the license have something for this, or make it better...)
-- Have any ideas but you're not sure how to implement it? Or don't know how to code? Contact me with your ideas. I'll work on it for you and communicate with you throughout the process. 
+- Have any ideas but you're not sure how to implement it? Or don't know how to code? Contact me with your ideas. I'll work on it for you and communicate with you throughout the process.
 
-## Issues?
+## Known issues
 
-- No, this will not work with Denuvo protected games. If you think it can, modify it so that it can work like an activated game, but even then I cannot guarantee it will work. It will likely reject you and you will need to get re-activated as your token will be fucked permanently. So basically, __I say just don't even bother. It'll likely waste your time and the activators' time too.__
-- As it is right now, DLC you don't own will likely not work - I'll try and add functionality for that in and if it works, then it'll likely work the same as Goldberg does.
-- If you're trying this with a game that has the AppId hard coded in (like with Godot games) then you'll need to modify the game to set the AppId to what you need it to be. Though, you won't even need this at all if you do that lol. 
-- You cannot join VAC protected servers or servers hosted using the real AppId in Garry's Mod or other Source games or any other games that have similar protections. (GoldSrc games seemingly do not apply, as CS1.6 let me join any servers.) Please do not message me asking why you can't join any servers in Garry's Mod. Instead, ask me how you can play with your friends if they have legitimate copies. :)
-- Game won't launch, or behaves like Steam isn't running? Check elevation before anything else — a game running as admin while Steam isn't (or vice versa) will refuse to start. See [Administrator / elevation](#administrator--elevation).
-- For any other unexpected or unaccounted for issues, please contact me. I have yet to test this with every game so I will rely on the community to do so. 
+- **Denuvo games will not work.** If you think it can be made to, modify it so it works like an activated game — but even then I can't guarantee anything. It will likely reject you and your token will be permanently messed up. **I say don't even bother**; it'll waste your time and the activators' time too.
+- **DLC you don't own** may still not work in every game. See [DLC](#dlc) for what is and isn't answerable.
+- **Games with the AppId hard-coded** (Godot games, for instance) need the game itself modified to use the AppId you want — though if you do that, you probably don't need this at all.
+- **VAC-protected servers, or servers hosted on the real AppId**, cannot be joined in Garry's Mod or other Source games and anything with similar protections. (GoldSrc seems fine — CS 1.6 let me join anything.) Please don't message me asking why Garry's Mod won't let you join. Ask me how to play with friends who own legitimate copies instead. :)
+- For anything else unexpected, contact me. I haven't tested every game and I rely on the community for that.
