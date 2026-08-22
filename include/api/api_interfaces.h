@@ -6,8 +6,9 @@ S_API ISteamApps* S_CALLTYPE SteamApps()
 S_API ISteamClient* S_CALLTYPE SteamClient()
 {
 	UCOLOG("[UCOnline2] SteamClient\r\n");
+
 	// An old-SDK caller indexes this vtable with its own offsets, so hand back
-	// the pinned version when configured. See [Settings] SteamClientVersion.
+	// the pinned version when configured. See [Settings] Client.
 	return g_pSteamClientLegacy ? g_pSteamClientLegacy : g_pSteamClientSafe;
 }
 

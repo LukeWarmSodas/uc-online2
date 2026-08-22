@@ -631,9 +631,47 @@ void UCO_RegisterCallbackPatcher(int iCallback, UCO_CallbackPatcherFn fn)
     UCOLOG("[UCOnline2] Callback patcher registered for iCallback=%d", iCallback);
 }
 
+// Steam reports stats and achievement callbacks against the app the SESSION is
+// running as -- our spoofed AppId -- but the game compares them against the id
+// it got from GetAppID, which we answer with ogAppId. The two disagree, the
+// game decides the callback is for some other game, and drops it.
+//
+// Rivals of Aether sat printing "Steam Stats not ready." forever because of
+// this, and gates its online menu on stats being ready, so multiplayer was
+// unreachable while every interface looked healthy.
+//
+// These three all begin with a CGameID, whose low 32 bits are the AppId, so the
+// rewrite is the same for each. Only the low half is touched: the high bits
+// carry the id TYPE (app / mod / shortcut) and must survive.
+static void PatchCallbackGameId(int iCallback, uint8* pBuf, uint32 cbBuf)
+{
+    if (!g_OriginalAppId || g_OriginalAppId == g_ForcedAppId) return;
+    if (!pBuf || cbBuf < sizeof(uint64)) return;
+
+    switch (iCallback)
+    {
+        case UserStatsReceived_t::k_iCallback:        // 1101
+        case UserStatsStored_t::k_iCallback:          // 1102
+        case UserAchievementStored_t::k_iCallback:    // 1103
+            break;
+        default:
+            return;
+    }
+
+    uint64 id = 0;
+    memcpy(&id, pBuf, sizeof(id));
+    if ((uint32)id != g_ForcedAppId) return;         // already right, or not ours
+
+    const uint64 fixed = (id & ~0xFFFFFFFFULL) | (uint64)g_OriginalAppId;
+    memcpy(pBuf, &fixed, sizeof(fixed));
+    UCOLOG("[UCOnline2] callback %d: GameID %u -> %u (so the game accepts it)",
+        iCallback, g_ForcedAppId, g_OriginalAppId);
+}
+
 static void RunCallbackPatchers(int iCallback, uint8* pBuf, uint32 cbBuf)
 {
     if (!pBuf || cbBuf == 0) return;
+    PatchCallbackGameId(iCallback, pBuf, cbBuf);
     AcquireSRWLockShared(&g_CallbackPatcherLock);
     // Iterate by index in case a patcher misbehaves and re-enters.
     size_t n = g_CallbackPatchers.size();
@@ -1975,7 +2013,21 @@ void InstallSteamSpoofHooks()
     //   7:BIsDlcInstalled        8:GetEarliestPurchaseUnixTime
     //   9:BIsSubscribedFromFreeWeekend               10:GetDLCCount
     //  11:BGetDLCDataByIndex    12:InstallDLC        13:UninstallDLC
-    if ((bSpoofAppId || UcoDlcStore::Active()) && g_ClientCtx.SteamApps())
+    // ...and that pin is exactly what [Settings] Client breaks. A game pinned to
+    // an old SteamClient asks for old interfaces too (Rivals of Aether takes
+    // STEAMAPPS_INTERFACE_VERSION007), which is a different object with a
+    // different layout from the 008 we hook by index. These are inline hooks on
+    // the function bodies, so the old-version caller still lands in them, and we
+    // then hand a v007 `this` to the v008 implementation -- which faults inside
+    // steamclient. Skip the hooks in that case: losing DLC unlocking is a far
+    // better outcome than crashing the game mid-session.
+    if (g_LegacyClientVersion[0] && (bSpoofAppId || UcoDlcStore::Active()))
+    {
+        UCOLOG("[UCOnline2] ISteamApps DLC hooks skipped: Client=%s means the game "
+               "uses an older ISteamApps whose vtable does not match ours",
+               g_LegacyClientVersion);
+    }
+    else if ((bSpoofAppId || UcoDlcStore::Active()) && g_ClientCtx.SteamApps())
     {
         void** appsVT = *reinterpret_cast<void***>(g_ClientCtx.SteamApps());
 
