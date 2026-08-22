@@ -461,12 +461,45 @@ set /p "EOS_SECRET=  EOS ClientSecret: "
 :ask_playfab
 if not defined HAS_PLAYFAB goto :ask_coherence
 echo.
-if defined HAS_COHERENCE (
-  echo   coherence is also present and is probably the multiplayer backend.
-  echo   Leave PlayFab empty unless testing proves it is required.
-  echo.
+rem When coherence is also present, PlayFab is probably NOT the backend and
+rem skipping is the right answer -- keep that prompt short.
+if defined HAS_COHERENCE goto :playfab_secondary
+
+rem Otherwise PlayFab IS how this game matchmakes, and the plugin sits idle
+rem without a TitleId. Skipping produces an install that launches perfectly and
+rem can never find anyone, which reads as "the fix is broken" rather than "a
+rem field was left blank" -- so spell out what blank costs, and offer the shared
+rem title the same way the coherence prompt below does.
+echo   This game brokers multiplayer through PlayFab, so it needs a TitleId.
+echo   Leaving it blank still gives you a working game, but NO multiplayer.
+echo.
+echo   EVERYONE YOU PLAY WITH MUST USE THE SAME TitleId, or you will not see
+echo   each other no matter what else is set up correctly.
+echo.
+if "%OGAPPID%"=="275850" (
+  echo   No Man's Sky: type SHARED to use the community title 1D861F, which is
+  echo   published for exactly this. Details: plugins\playfab_universal\README.md
+) else (
+  echo   Type SHARED for the community title 1D861F, enter your own title, or
+  echo   leave blank. Details: plugins\playfab_universal\README.md
 )
+echo.
+set /p "PF_TITLE=  PlayFab TitleId (SHARED / your own / blank): "
+if /i "!PF_TITLE!"=="SHARED" set "PF_TITLE=1D861F"
+if defined PF_TITLE (
+  echo   Using PlayFab TitleId !PF_TITLE! -- make sure everyone matches it.
+) else (
+  echo   [WARN] No TitleId set. PlayFab multiplayer will NOT work until you fill
+  echo          in TitleId under [PlayFab] in union-crax.ini.
+)
+goto :ask_coherence
+
+:playfab_secondary
+echo   coherence is also present and is probably the multiplayer backend.
+echo   Leave PlayFab empty unless testing proves it is required.
+echo.
 set /p "PF_TITLE=  PlayFab TitleId (press Enter to skip): "
+if /i "!PF_TITLE!"=="SHARED" set "PF_TITLE=1D861F"
 
 :ask_coherence
 if not defined HAS_COHERENCE goto :write_ini
