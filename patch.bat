@@ -1,4 +1,33 @@
 @echo off
+rem Release packages include both interfaces. Ask on normal launches, while
+rem /gui and /legacy keep shortcuts and automated use deterministic.
+set "GUI_EXE=%~dp0UCO2.Patcher.exe"
+if /i "%~1"=="/legacy" (
+  shift
+  goto legacy_start
+)
+if /i "%~1"=="/gui" (
+  shift
+  goto launch_gui
+)
+if exist "%GUI_EXE%" (
+  echo.
+  choice /c YN /n /m "Use the new UCOnline2 GUI (experimental)? [Y/N] "
+  if errorlevel 2 goto legacy_start
+  goto launch_gui
+)
+goto legacy_start
+
+:launch_gui
+if not exist "%GUI_EXE%" goto legacy_start
+if "%~1"=="" (
+  start "" "%GUI_EXE%"
+) else (
+  start "" "%GUI_EXE%" --game "%~1"
+)
+exit /b 0
+
+:legacy_start
 setlocal enableextensions enabledelayedexpansion
 title UCOnline2 - patch.bat (auto-patcher)
 color 0b

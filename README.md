@@ -18,8 +18,14 @@ Custom modified Steam API .dll for Steam games to spoof your game as Spacewar. D
 
 ## Quick start
 
-**Drag your game folder onto `patch.bat`.** It works out what the game needs and
-does the whole setup, which for most games is everything you have to do.
+**Run `UCO2.Patcher.exe` or drag your game folder onto `patch.bat`.** Release
+packages include a folder-first GUI **(experimental)** that searches the folder
+name on Steam for the game AppId, plus preflight detection, large option toggles,
+a final review, verified backup snapshots, one-click restore, installed-fix
+updates and path-preserving fix ZIP packaging.
+
+`patch.bat` asks whether to use the new GUI or the original interactive flow.
+Use `patch.bat /gui` or `patch.bat /legacy` to choose directly.
 
 It will:
 

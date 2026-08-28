@@ -1,0 +1,71 @@
+<Window x:Class="UCO2.Patcher.Gui.ReviewWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Review patch" Width="860" Height="720" MinWidth="720" MinHeight="560"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="70" /><RowDefinition Height="*" /><RowDefinition Height="62" /></Grid.RowDefinitions>
+        <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+            <StackPanel Margin="20,0" VerticalAlignment="Center">
+                <TextBlock x:Name="HeadingText" Text="Review patch" FontSize="21" FontWeight="SemiBold" />
+                <TextBlock Text="Nothing is changed until you confirm" Foreground="{StaticResource MutedBrush}" />
+            </StackPanel>
+        </Border>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Background="{StaticResource WindowBrush}">
+            <StackPanel Margin="20,16">
+                <TextBlock Text="TARGET" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,8" />
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="140" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /></Grid.RowDefinitions>
+                    <TextBlock Text="Game" Margin="0,5" Foreground="{StaticResource MutedBrush}" /><TextBlock x:Name="GameValue" Grid.Column="1" Margin="0,5" FontWeight="SemiBold" />
+                    <TextBlock Grid.Row="1" Text="Folder" Margin="0,5" Foreground="{StaticResource MutedBrush}" /><TextBlock x:Name="FolderValue" Grid.Row="1" Grid.Column="1" Margin="0,5" TextWrapping="Wrap" />
+                    <TextBlock Grid.Row="2" Text="Detected" Margin="0,5" Foreground="{StaticResource MutedBrush}" /><TextBlock x:Name="DetectedValue" Grid.Row="2" Grid.Column="1" Margin="0,5" />
+                    <TextBlock Grid.Row="3" Text="Steam AppIds" Margin="0,5" Foreground="{StaticResource MutedBrush}" /><TextBlock x:Name="AppIdsValue" Grid.Row="3" Grid.Column="1" Margin="0,5" />
+                </Grid>
+
+                <Separator Margin="0,14" Background="{StaticResource BorderBrush}" />
+                <TextBlock Text="SETTINGS" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,8" />
+                <ItemsControl x:Name="SettingsList">
+                    <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="4" Margin="0,0,8,8" Padding="10,7">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="{Binding Name}" />
+                                    <TextBlock Text="  " />
+                                    <TextBlock Text="{Binding Value}" Foreground="{StaticResource AccentBrush}" FontWeight="Bold" />
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <TextBlock Text="WARNINGS" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" Margin="0,10,0,8" />
+                <ItemsControl x:Name="WarningsList">
+                    <ItemsControl.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" Foreground="#F0C36A" TextWrapping="Wrap" Margin="0,0,0,5" /></DataTemplate></ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock x:Name="NoWarningsText" Text="No warnings" Foreground="{StaticResource MutedBrush}" />
+
+                <TextBlock Text="FILE CHANGES" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" Margin="0,14,0,8" />
+                <ListView x:Name="ChangesList" Height="220" Background="#0E1214" BorderBrush="{StaticResource BorderBrush}">
+                    <ListView.View><GridView>
+                        <GridViewColumn Header="Action" Width="100" DisplayMemberBinding="{Binding Action}" />
+                        <GridViewColumn Header="Description" Width="230" DisplayMemberBinding="{Binding Description}" />
+                        <GridViewColumn Header="Game-relative path" Width="430" DisplayMemberBinding="{Binding RelativePath}" />
+                    </GridView></ListView.View>
+                </ListView>
+            </StackPanel>
+        </ScrollViewer>
+
+        <Border Grid.Row="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0">
+            <Grid Margin="16,0">
+                <TextBlock x:Name="FooterText" Text="Existing files are backed up before any write" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <Button x:Name="CancelButton" Content="Cancel" MinWidth="90" IsCancel="True" />
+                    <Button x:Name="ConfirmButton" Content="Back up and apply" MinWidth="150" Style="{StaticResource PrimaryButton}" IsDefault="True" Click="Confirm_Click" />
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

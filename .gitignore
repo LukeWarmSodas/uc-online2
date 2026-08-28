@@ -12,6 +12,9 @@ plugins_unreleased/*/relbuild/
 plugins_unreleased/*/debbuild/
 tools/*/relbuild/
 tools/*/debbuild/
+tools/UCO2.Patcher/**/bin/
+tools/UCO2.Patcher/**/obj/
+tools/UCO2.Patcher/publish/
 
 # Per-user IDE state
 *.vcxproj.user

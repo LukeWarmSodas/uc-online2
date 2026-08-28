@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>UCO2.Patcher</AssemblyName>
+    <RootNamespace>UCO2.Patcher.Gui</RootNamespace>
+    <ApplicationIcon>..\..\..\icon.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\UCO2.Patcher.Core\UCO2.Patcher.Core.csproj" />
+  </ItemGroup>
+</Project>
