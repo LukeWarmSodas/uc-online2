@@ -576,8 +576,14 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 			UcoDlcStore::UnlockAll() ? 1 : 0, UcoDlcStore::Count(),
 			UcoDlcStore::Count() == 1 ? "y" : "ies");
 
-		g_bEmulateAuthTicket = s_PluginLoader.GetEmulateTicketEnabled();
-		if (s_PluginLoader.GetEmulateTicketEnabled()) {
+		const bool passthroughTicket = s_PluginLoader.GetPassthroughTicketEnabled();
+		const bool emulateTicket = s_PluginLoader.GetEmulateTicketEnabled();
+		g_bEmulateAuthTicket = emulateTicket && !passthroughTicket;
+		if (passthroughTicket) {
+			UCOLOG("[UCOnline2] PassthroughTicket enabled -- using genuine Steam tickets%s",
+				emulateTicket ? " (overrides EmulateTicket)" : "");
+		}
+		if (g_bEmulateAuthTicket) {
 			uint32 emulatedAppId = s_PluginLoader.GetOgAppId();
 			if (emulatedAppId == 0) emulatedAppId = s_PluginLoader.GetAppId();
 			CSteamUserStub::SetEmulatedApp(emulatedAppId);
@@ -883,8 +889,14 @@ bool CCallbackDispatcher::DispatchToTarget(int iCallback, void* pvData, uint32 c
                                            HSteamUser user, bool bServer)
 {
 	CCallbackBase* target = nullptr;
-	const bool preferNewest = iCallback ==
-		SteamNetConnectionStatusChangedCallback_t::k_iCallback;
+	// Request-scoped networking and ticket listeners are commonly registered
+	// alongside an older long-lived wrapper. The listener created for the active
+	// request is the newest one; delivering only to the stale first registration
+	// leaves the caller waiting even though Steam returned a successful result.
+	const bool preferNewest =
+		iCallback == SteamNetConnectionStatusChangedCallback_t::k_iCallback ||
+		iCallback == GetAuthSessionTicketResponse_t::k_iCallback ||
+		iCallback == GetTicketForWebApiResponse_t::k_iCallback;
 	auto range = m_CallbackMap.equal_range(iCallback);
 	for (auto it = range.first; it != range.second; ++it)
 	{
@@ -1795,6 +1807,47 @@ static HAuthTicket S_CALLTYPE Hooked_GetAuthSessionTicket4(void* pThis, void* pT
     return UcoEmitAuthTicket(pTicket, cbMaxTicket, pcbTicket);
 }
 
+// GetAuthTicketForWebApi (SteamUser023+) is the WebApi-flavoured sibling of
+// GetAuthSessionTicket. Unlike the session call it does NOT fill a caller
+// buffer -- it returns only a handle and delivers the ticket bytes INLINE in
+// GetTicketForWebApiResponse_t (callback 168).
+//
+// Games that authenticate to a secondary backend (EOS/Redpoint, a publisher
+// web service) with a Steam WebApi ticket gate their whole online flow on this
+// callback: Pizza House Simulator registers cb168, waits, retries, and never
+// reaches EOS_Connect_Login when it never arrives. When a plugin swaps the
+// downstream EOS login to Device ID the ticket CONTENT is irrelevant -- we only
+// have to make the callback fire so the game advances past the Steam gate. Same
+// locally-parseable structure as the session ticket; the signature we cannot
+// forge stays zeroed (anything that verifies it server-side is out of reach by
+// definition, exactly as for GetAuthSessionTicket).
+static HAuthTicket S_CALLTYPE Hooked_GetAuthTicketForWebApi(void* pThis, const char* pchIdentity)
+{
+    (void)pThis;
+
+    uint64 steamId = 0;
+    if (g_ClientCtx.SteamUser())
+        steamId = g_ClientCtx.SteamUser()->GetSteamID().ConvertToUint64();
+    const uint32 appId = g_OriginalAppId ? g_OriginalAppId : g_ForcedAppId;
+
+    GetTicketForWebApiResponse_t resp = {};
+    const uint32 cb = UcoBuildSteamAuthTicket(resp.m_rgubTicket,
+                                              GetTicketForWebApiResponse_t::k_nCubTicketMaxLength,
+                                              appId, steamId);
+    const HAuthTicket handle = (HAuthTicket)InterlockedCompareExchange(&g_NextAuthTicket, 0, 0);
+
+    resp.m_hAuthTicket = handle;
+    resp.m_eResult     = k_EResultOK;
+    resp.m_cubTicket   = (int)cb;
+    if (GetDispatcher())
+        GetDispatcher()->PostCallback(GetTicketForWebApiResponse_t::k_iCallback,
+            &resp, sizeof(resp), g_ClientUser, false, 10);
+
+    UCOLOG("[UCOnline2] GetAuthTicketForWebApi emulated -> handle=%u appid=%u size=%u identity=%s",
+        handle, appId, cb, pchIdentity ? pchIdentity : "(null)");
+    return handle;
+}
+
 // Legacy client/server authentication uses this older entry point instead of
 // GetAuthSessionTicket.  Its payload is still handed to the game server as an
 // opaque auth blob, so use the same locally parseable ticket structure.  The
@@ -1896,6 +1949,7 @@ struct UcoUserAuthLayout
     int initiate;
     int terminate;
     int  getTicket;
+    int  webapi;                 // GetAuthTicketForWebApi; -1 on versions that lack it
     int  begin;
     int  end;
     int  cancel;
@@ -1907,9 +1961,11 @@ static bool UcoUserAuthLayoutFor(const char* ver, UcoUserAuthLayout& out)
     if (!ver || _strnicmp(ver, "SteamUser", 9) != 0)
         return false;
     const int n = atoi(ver + 9);
-    if (n == 21) { out.initiate = 3; out.terminate = 4; out.getTicket = 13; out.begin = 14; out.end = 15; out.cancel = 16; out.ticketTakesIdentity = false; return true; }
-    if (n == 22) { out.initiate = 3; out.terminate = 4; out.getTicket = 13; out.begin = 14; out.end = 15; out.cancel = 16; out.ticketTakesIdentity = true;  return true; }
-    if (n >= 23) { out.initiate = 3; out.terminate = 4; out.getTicket = 13; out.begin = 15; out.end = 16; out.cancel = 17; out.ticketTakesIdentity = true;  return true; }
+    // GetAuthTicketForWebApi was inserted at index 14 in SteamUser023, pushing
+    // Begin/End/Cancel down one; 021/022 predate it (webapi = -1).
+    if (n == 21) { out.initiate = 3; out.terminate = 4; out.getTicket = 13; out.webapi = -1; out.begin = 14; out.end = 15; out.cancel = 16; out.ticketTakesIdentity = false; return true; }
+    if (n == 22) { out.initiate = 3; out.terminate = 4; out.getTicket = 13; out.webapi = -1; out.begin = 14; out.end = 15; out.cancel = 16; out.ticketTakesIdentity = true;  return true; }
+    if (n >= 23) { out.initiate = 3; out.terminate = 4; out.getTicket = 13; out.webapi = 14; out.begin = 15; out.end = 16; out.cancel = 17; out.ticketTakesIdentity = true;  return true; }
     return false;   // 020 and older: layouts not verified, so do not touch them
 }
 
@@ -1948,14 +2004,18 @@ void UcoInstallUserAuthHooks(void* pIface, const char* ver)
         { L.initiate, (void*)&Hooked_InitiateGameConnection, "InitiateGameConnection" },
         { L.terminate, (void*)&Hooked_TerminateGameConnection, "TerminateGameConnection" },
         { L.getTicket, getTicketDetour,             "GetAuthSessionTicket" },
+        { L.webapi,    (void*)&Hooked_GetAuthTicketForWebApi, "GetAuthTicketForWebApi" },
         { L.begin,     (void*)&Hooked_BeginAuthSession, "BeginAuthSession" },
         { L.end,       (void*)&Hooked_EndAuthSession,   "EndAuthSession" },
         { L.cancel,    (void*)&Hooked_CancelAuthTicket, "CancelAuthTicket" },
     };
 
-    int ok = 0;
+    int ok = 0, applicable = 0;
     for (const Item& it : items)
     {
+        if (it.index < 0)                          // method absent in this version
+            continue;
+        ++applicable;
         void* target = vt[it.index];
         void* dummyOriginal = nullptr;             // detours never call through
         MH_STATUS st = MH_CreateHook(target, it.detour, &dummyOriginal);
@@ -1971,8 +2031,8 @@ void UcoInstallUserAuthHooks(void* pIface, const char* ver)
                 ver, it.name, it.index, st);
     }
 
-    UCOLOG("[UCOnline2] auth ticket emulation: %d/6 hooks installed on %s%s",
-        ok, ver, L.ticketTakesIdentity ? "" : " (3-arg ticket variant)");
+    UCOLOG("[UCOnline2] auth ticket emulation: %d/%d hooks installed on %s%s",
+        ok, applicable, ver, L.ticketTakesIdentity ? "" : " (3-arg ticket variant)");
 }
 
 void InstallSteamSpoofHooks()

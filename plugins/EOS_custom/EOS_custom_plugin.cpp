@@ -260,6 +260,46 @@ typedef void          (__cdecl* Fn_EOS_Connect_Login)(EOS_HConnect Handle, const
 static Fn_EOS_Platform_Create g_orig_Platform_Create = nullptr;
 static Fn_EOS_Connect_Login   g_orig_Connect_Login   = nullptr;
 
+// ------------------------------------------------------------
+// EOS SDK logging bridge.
+//
+// Shipping UE builds compile out UE_LOG and print nothing to stdout, so when a
+// game stalls mid-login we are blind to the EOS side: did EOS_Platform_Create
+// return a valid handle? did the game query Connect? what EResult came back?
+// Routing the SDK's OWN log (EOS_Logging_SetCallback) into the host log answers
+// all of that, and is reusable for every EOS title.
+//
+// EOS_Logging_SetCallback must run AFTER EOS_Initialize, so we arm it once from
+// inside Hooked_Platform_Create (by then Initialize has run) rather than at
+// hook-install time.
+struct EOS_LogMessage { const char* Category; const char* Message; int32_t Level; };
+typedef void        (__cdecl* EOS_LogMessageFunc)(const EOS_LogMessage*);
+typedef EOS_EResult (__cdecl* Fn_EOS_Logging_SetCallback)(EOS_LogMessageFunc);
+typedef EOS_EResult (__cdecl* Fn_EOS_Logging_SetLogLevel)(int32_t Category, int32_t Level);
+static Fn_EOS_Logging_SetCallback g_pfn_SetLogCallback = nullptr;
+static Fn_EOS_Logging_SetLogLevel g_pfn_SetLogLevel    = nullptr;
+
+static const char* EosLogLevelName(int32_t lvl)
+{
+    switch (lvl) {
+        case 100: return "Fatal";   case 200: return "Error";
+        case 300: return "Warning"; case 400: return "Info";
+        case 500: return "Verbose"; case 600: return "VeryVerbose";
+        default:  return "?";
+    }
+}
+
+// EosLog (defined above) uses the host logger, which is file-backed and safe to
+// call from the SDK's logging thread(s).
+static void __cdecl UcoEosLogSink(const EOS_LogMessage* m)
+{
+    if (!m) return;
+    EosLog("[EOS-SDK][%s][%s] %s",
+        m->Category ? m->Category : "?",
+        EosLogLevelName(m->Level),
+        m->Message ? m->Message : "");
+}
+
 static const char* SafeStr(const char* s) { return s ? s : "(null)"; }
 
 // ------------------------------------------------------------
@@ -311,6 +351,20 @@ static bool LooksLikeEosId(const char* s)
 // ------------------------------------------------------------
 static EOS_HPlatform __cdecl Hooked_Platform_Create(const void* Options)
 {
+    // Arm EOS SDK logging exactly once. By the time the game reaches
+    // Platform_Create, EOS_Initialize has run, so SetCallback is now valid.
+    static LONG s_logArmed = 0;
+    if (InterlockedCompareExchange(&s_logArmed, 1, 0) == 0) {
+        if (g_pfn_SetLogCallback) {
+            g_pfn_SetLogCallback(&UcoEosLogSink);
+            if (g_pfn_SetLogLevel)
+                g_pfn_SetLogLevel(0x7fffffff /*EOS_LC_ALL_CATEGORIES*/, 500 /*EOS_LOG_Verbose*/);
+            LOG("[EOSAuth] EOS SDK logging routed into host log (verbose).");
+        } else {
+            LOG("[EOSAuth] EOS_Logging_SetCallback not exported -- SDK internals stay invisible.");
+        }
+    }
+
     if (Options) {
         uint8_t* p = (uint8_t*)Options;   // writable: we redirect the ids in place
 
@@ -705,6 +759,11 @@ static bool InstallHooksLocked()
     g_pfn_CreateDeviceId = (Fn_EOS_Connect_CreateDeviceId)GetProcAddress(hEos, "EOS_Connect_CreateDeviceId");
     if (!g_pfn_CreateDeviceId)
         LOG("[EOSAuth] WARNING: EOS_Connect_CreateDeviceId not exported; Device ID login will fail with EOS_NotFound");
+
+    // Resolved here, ARMED later (from Hooked_Platform_Create, once EOS_Initialize
+    // has run) so the SDK's own log flows into the host log.
+    g_pfn_SetLogCallback = (Fn_EOS_Logging_SetCallback)GetProcAddress(hEos, "EOS_Logging_SetCallback");
+    g_pfn_SetLogLevel    = (Fn_EOS_Logging_SetLogLevel)GetProcAddress(hEos, "EOS_Logging_SetLogLevel");
     if (!pPlatformCreate || !pConnectLogin) {
         LOG("[EOSAuth] EOS module loaded but exports missing "
             "(Platform_Create=%p Connect_Login=%p). Is this the real Epic SDK?",

@@ -121,6 +121,7 @@ All keys live under `[Settings]` unless noted.
 | `ogAppId` | *(none)* | The game's real AppId. Used for the overlay, DLC, tickets and stats. |
 | `PluginsFolder` | *(none)* | Folder of `.dll` plugins to load, relative to the exe. |
 | `EmulateTicket` | `false` | [Ticket emulation](#ticket-emulation) for peer-validated multiplayer. |
+| `PassthroughTicket` | `false` | Explicitly use genuine Steam tickets. Overrides `EmulateTicket` when both are enabled. |
 | `Client` | *(none)* | Pin the `SteamClient()` version for [old-SDK games](#old-sdk-games-client), e.g. `017`. |
 | `SDR` | `false` | [Steam Datagram Relay](#steam-datagram-relay-sdr) split context. Requires `ogAppId`. |
 | `GetStubbedLol` | `false` | Patch [SteamStub](#steamstub) at runtime instead of unpacking. |
@@ -176,6 +177,17 @@ To check what was picked up, look in `%TEMP%/uc_online2.log` for:
 > forcing it there crashes the game.
 
 ### Ticket emulation
+
+Set `PassthroughTicket=yes` when the game needs Steam to return a genuine ticket
+for `AppId`, but a later authentication step is handled separately. The normal
+Steam calls and callbacks remain untouched. `true`, `1`, `yes`, and `on` are
+accepted. If both ticket settings are enabled, passthrough wins.
+
+```ini
+[Settings]
+AppId=480
+PassthroughTicket=yes
+```
 
 `EmulateTicket` covers **both** kinds of Steam ticket a game may ask for:
 

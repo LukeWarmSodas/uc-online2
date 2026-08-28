@@ -181,6 +181,18 @@ uint32 GetOgAppId()
 		return IniReadBool("EmulateTicket", false);
 	}
 
+	// Explicitly keep Steam's genuine ticket path. This is useful for games that
+	// only need a real ticket to advance to a downstream auth layer which a
+	// plugin handles separately. It intentionally overrides EmulateTicket when
+	// both keys are present, making old/generated configs safe to amend.
+	bool GetPassthroughTicketEnabled()
+	{
+		if (m_IniPath[0] == '\0')
+			return false;
+
+		return IniReadBool("PassthroughTicket", false);
+	}
+
 	bool GetSteamStubEnabled()
 	{
 		if (m_IniPath[0] == '\0')
