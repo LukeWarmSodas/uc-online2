@@ -95,6 +95,59 @@ static const char* GetIniPath()
 }
 
 // ============================================================
+// Player display name -> Photon custom-auth params[216]
+//
+// Photon forwards ClientAuthenticationParams (param code 216) to
+// the configured Custom Authentication URL as a query string. Our
+// permissive Cloudflare Worker echoes ?name=... back as the auth
+// Nickname, which PUN uses for the local player. Without this the
+// Worker returns a constant "Player" for everyone.
+//
+// We source the name from the real Steam persona (UCOnline2 proxies
+// ISteamFriends straight through to real Steam), or from an explicit
+// [Realtime] Nickname= override. Built once at init; empty disables
+// the injection so the Worker just keeps its old constant.
+// ============================================================
+static char g_LoginAuthParam[192] = {};   // e.g. "name=John%20Doe", or empty
+
+static void BuildLoginAuthParam(ISteamFriends* pFriends, const char* iniOverride)
+{
+    char nameBuf[160] = {};
+    const char* source = "";
+    if (iniOverride && iniOverride[0]) {
+        strncpy_s(nameBuf, sizeof(nameBuf), iniOverride, _TRUNCATE);
+        source = "ini override";
+    } else if (pFriends) {
+        // GetPersonaName() is vtable index 0 on ISteamFriends.
+        // x64 __thiscall == __fastcall (this in RCX).
+        typedef const char* (__fastcall *Fn_GetPersonaName)(void*);
+        void** vtbl = *(void***)pFriends;
+        const char* n = (vtbl && vtbl[0]) ? ((Fn_GetPersonaName)vtbl[0])(pFriends) : nullptr;
+        if (n && n[0]) { strncpy_s(nameBuf, sizeof(nameBuf), n, _TRUNCATE); source = "Steam persona"; }
+    }
+    if (!nameBuf[0]) {
+        LOG("[Universal] no Steam persona name / Nickname override; params[216] passthrough disabled");
+        return;
+    }
+
+    // URL-encode the name (RFC 3986 unreserved set stays literal).
+    char enc[176]; size_t o = 0;
+    for (const unsigned char* p = (const unsigned char*)nameBuf; *p && o + 3 < sizeof(enc); ++p) {
+        unsigned char c = *p;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            enc[o++] = (char)c;
+        } else {
+            static const char* hex = "0123456789ABCDEF";
+            enc[o++] = '%'; enc[o++] = hex[c >> 4]; enc[o++] = hex[c & 0xF];
+        }
+    }
+    enc[o] = 0;
+    _snprintf_s(g_LoginAuthParam, sizeof(g_LoginAuthParam), _TRUNCATE, "name=%s", enc);
+    LOG("[Universal] Photon Nickname from %s '%s' -> params[216]=%s", source, nameBuf, g_LoginAuthParam);
+}
+
+// ============================================================
 // MODULE: Realtime / PUN (IL2CPP backend)
 //
 // Hooks LoadBalancingPeer.OpAuthenticate / OpAuthenticateOnce,
@@ -220,6 +273,11 @@ static bool __fastcall Hooked_SendOp(void* pThis, uint8_t op, void* params, void
         }
         if (g_ForcedAuthType <= 255) {
             IL2CPP_DictByteByteSetItem((Il2CppObject*)params, 217, (uint8_t)(g_ForcedAuthType & 0xFF));
+        }
+        // Only the Authenticate ops carry custom-auth params to the Worker.
+        if ((op == 230 || op == 231) && g_LoginAuthParam[0]) {
+            if (IL2CPP_DictByteStringSetItem((Il2CppObject*)params, 216, g_LoginAuthParam))
+                LOG("[Realtime] SendOp op=%u: params[216] auth-params -> %s", op, g_LoginAuthParam);
         }
     }
     return g_pfnOrigSendOp(pThis, op, params, opts, a5, a6);
@@ -433,6 +491,11 @@ static bool __fastcall Hooked_SendOp(void* pThis, uint8_t op, void* params, void
         if (g_ForcedAuthType <= 255) {
             MONO_DictByteByteSetItem((MonoObject*)params, 217, (uint8_t)(g_ForcedAuthType & 0xFF));
         }
+        // Only the Authenticate ops carry custom-auth params to the Worker.
+        if ((op == 230 || op == 231) && g_LoginAuthParam[0]) {
+            if (MONO_DictByteStringSetItem((MonoObject*)params, 216, g_LoginAuthParam))
+                LOG("[Realtime/Mono] SendOp op=%u: params[216] auth-params -> %s", op, g_LoginAuthParam);
+        }
     }
     return g_pfnOrigSendOp(pThis, op, params, opts, a5, a6);
 }
@@ -635,13 +698,20 @@ extern "C" __declspec(dllexport) int __cdecl UCO_PluginInit(const UCO_PluginCont
         g_ForcedAppId, g_OriginalAppId);
 
     const char* ini = GetIniPath();
+    char nickOverride[160] = {};
     if (ini) {
         ModRealtimeIL2CPP::ReadIni(ini);
         ModRealtimeMono::ReadIni(ini);
         ModFusion::ReadIni(ini);
+        GetPrivateProfileStringA("Realtime", "Nickname", "", nickOverride, sizeof(nickOverride), ini);
+        if (!nickOverride[0]) GetPrivateProfileStringA("PUN", "Nickname", "", nickOverride, sizeof(nickOverride), ini);
     } else {
         LOG("[Universal] no union-crax.ini found");
     }
+
+    // Feed the player's display name into Photon custom-auth params[216].
+    // Default: real Steam persona (proxied through). Override: [Realtime] Nickname=.
+    BuildLoginAuthParam(ctx->pSteamFriends, nickOverride);
 
     if (MH_Initialize() != MH_OK)
         LOG("[Universal] MH_Initialize non-OK (already inited?)");

@@ -59,11 +59,15 @@ Worker code:
 
 ```js
 export default {
-  async fetch() {
+  async fetch(request) {
+    // The plugin sends the player's Steam name as ?name=... (see "Player
+    // display name" below). Echo it back as the Nickname; fall back to a
+    // constant if it's absent.
+    const name = new URL(request.url).searchParams.get("name") || "Player";
     return new Response(JSON.stringify({
       ResultCode: 1,
       UserId: "anon-" + crypto.randomUUID(),
-      Nickname: "Player"
+      Nickname: name
     }), { headers: { "Content-Type": "application/json" } });
   }
 };
@@ -111,6 +115,17 @@ ForcedAuthType=0
 - `ForcedAuthType=0` — `Custom` (matches the Custom Auth provider). Use `255` for `None` if you want pure anonymous instead.
 
 The `[Realtime]` section is also accepted under the legacy name `[PUN]`, so inis written by older tooling keep working.
+
+### Player display name (Steam username)
+
+Games that read their nickname from the Custom Auth response (e.g. Phasmophobia) otherwise show the Worker's constant `Nickname` for *every* player. The plugin fixes this by sending the player's name to the Worker as a custom-auth parameter:
+
+- On `OpAuthenticate` it sets `params[216]` (`ClientAuthenticationParams`) to `name=<url-encoded name>`. Photon forwards that to the Custom Auth URL as `?name=...`, and the Worker echoes it back as the `Nickname` (see the Worker code above).
+- The name defaults to the **real Steam persona** — UCOnline2 proxies `ISteamFriends` straight through to real Steam, so each player gets their own Steam username automatically. No config needed.
+- Override with `[Realtime] Nickname=<text>` if you want a fixed name instead.
+- Requires the name-echoing Worker above. With the old constant-`Nickname` Worker the injected param is simply ignored (safe no-op).
+
+Log line proving it fired: `[Universal] Photon Nickname from Steam persona '…' -> params[216]=name=…`.
 
 ### 5. Launch and verify
 
