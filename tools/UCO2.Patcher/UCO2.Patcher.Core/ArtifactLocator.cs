@@ -35,6 +35,10 @@ public sealed class ArtifactLocator
         Path.Combine(BaseDirectory, "overlay_proxy.dll"),
         Path.Combine(BaseDirectory, "..", "..", "plugins", "steam_overlay", "relbuild", "x64", "overlay_proxy.dll"));
 
+    public string? FindCoherenceSchemaTool() => FirstExisting(
+        Path.Combine(BaseDirectory, "tools", "coherence_schema", "Run-CoherenceSchemaPipeline.bat"),
+        Path.Combine(BaseDirectory, "..", "..", "tools", "coherence_schema", "Run-CoherenceSchemaPipeline.bat"));
+
     public string? FindPlugin(string name) => FirstExisting(
         Path.Combine(BaseDirectory, "plugins", name, "relbuild", "x64", name + ".dll"),
         Path.Combine(BaseDirectory, "plugins", name + ".dll"),

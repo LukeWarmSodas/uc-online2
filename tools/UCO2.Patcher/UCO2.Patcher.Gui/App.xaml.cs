@@ -22,7 +22,7 @@ public partial class App : Application
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "UCOnline2 update failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                NativeDialog.Error(null, "UCOnline2 update failed", ex.Message);
             }
             Shutdown();
             return;

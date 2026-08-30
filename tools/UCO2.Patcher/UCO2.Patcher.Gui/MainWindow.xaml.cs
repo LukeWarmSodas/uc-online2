@@ -84,13 +84,14 @@ public partial class MainWindow : Window
                 Log($"Required backend settings are missing for {names}. Fill them under Advanced settings or disable those plugins.");
             }
 
+            if (scan.Backends.HasFlag(BackendKind.Coherence))
+                OfferCoherenceSchemaUpload();
+
             if (refreshFixAfterUpdate)
             {
                 refreshFixAfterUpdate = false;
-                MessageBoxResult answer = MessageBox.Show(
-                    "The patcher was updated and its bundled DLLs may be newer. Back up and refresh this installed fix now?",
-                    "Update installed fix", MessageBoxButton.YesNo, MessageBoxImage.Question);
-                if (answer == MessageBoxResult.Yes)
+                if (NativeDialog.Confirm(this, "Update installed fix",
+                        "The patcher was updated and its bundled DLLs may be newer. Back up and refresh this installed fix now?"))
                     await ApplyPlanAsync("Update installed fix");
             }
         }
@@ -418,10 +419,9 @@ public partial class MainWindow : Window
         advancedExpandedForBackendNotice = true;
         string details = string.Join(Environment.NewLine, missing.Select(item =>
             $"- {item.Backend}: {string.Join(", ", item.Fields)}"));
-        MessageBox.Show(
+        NativeDialog.Warn(this, "Plugin settings required",
             "The selected plugins need these fields before they can be installed:\n\n" + details +
-            "\n\nFill the fields under Advanced settings, or turn off any plugin you do not want.",
-            "Plugin settings required", MessageBoxButton.OK, MessageBoxImage.Warning);
+            "\n\nFill the fields under Advanced settings, or turn off any plugin you do not want.");
         return false;
     }
 
@@ -455,10 +455,9 @@ public partial class MainWindow : Window
         if (available.Count == 0) return;
 
         string names = string.Join(", ", available);
-        MessageBoxResult answer = MessageBox.Show(
-            $"Saved settings are available for {names}.\n\nUse them to fill the blank fields for this game? Existing values will not be changed.",
-            "Use saved backend settings", MessageBoxButton.YesNo, MessageBoxImage.Question);
-        if (answer != MessageBoxResult.Yes) return;
+        if (!NativeDialog.Confirm(this, "Use saved backend settings",
+                $"Saved settings are available for {names}.\n\nUse them to fill the blank fields for this game? Existing values will not be changed."))
+            return;
 
         if (offerPhoton)
         {
@@ -531,15 +530,15 @@ public partial class MainWindow : Window
             string completion = profileWarning is null
                 ? "The fix was backed up, installed, and verified."
                 : $"The fix was backed up, installed, and verified.\n\nSaved backend settings could not be updated: {profileWarning}";
-            MessageBox.Show(completion, "UCOnline2", MessageBoxButton.OK,
-                profileWarning is null ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            if (profileWarning is null) NativeDialog.Info(this, "Fix installed", completion);
+            else NativeDialog.Warn(this, "Fix installed", completion);
         }
         catch (Exception ex)
         {
             ShowError("Patch failed", ex);
             if (ContainsUnauthorized(ex) && !IsAdministrator())
             {
-                if (MessageBox.Show("This game folder requires administrator access. Restart the patcher elevated?", "Administrator access required", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
+                if (NativeDialog.Confirm(this, "Administrator access required", "This game folder requires administrator access. Restart the patcher elevated?"))
                     RestartElevated();
             }
         }
@@ -582,14 +581,14 @@ public partial class MainWindow : Window
     private async void Restore_Click(object sender, RoutedEventArgs e)
     {
         if (BackupGrid.SelectedItem is not BackupSnapshot snapshot) return;
-        if (MessageBox.Show($"Restore snapshot {snapshot.Id}? Current files at those paths will be replaced.", "Restore backup", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        if (!NativeDialog.Confirm(this, "Restore backup", $"Restore snapshot {snapshot.Id}? Current files at those paths will be replaced.", warning: true)) return;
         SetBusy(true, "Restoring backup...");
         try
         {
             await backups.RestoreAsync(snapshot.ManifestPath, new Progress<string>(message => { StatusText.Text = message; Log(message); }));
             await RefreshBackupsAsync();
             RefreshPlan(selectChangesTab: false);
-            MessageBox.Show("Backup restored and verified.", "UCOnline2", MessageBoxButton.OK, MessageBoxImage.Information);
+            NativeDialog.Info(this, "Backup restored", "Backup restored and verified.");
         }
         catch (Exception ex) { ShowError("Restore failed", ex); }
         finally { SetBusy(false); }
@@ -598,13 +597,13 @@ public partial class MainWindow : Window
     private async void PackageFix_Click(object sender, RoutedEventArgs e)
     {
         if (plan is null) return;
-        if (MessageBox.Show("The package contains the deployed union-crax.ini, including any backend credentials in it. Create a shareable ZIP in the game root?", "Package current fix", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        if (!NativeDialog.Confirm(this, "Package current fix", "The package contains the deployed union-crax.ini, including any backend credentials in it. Create a shareable ZIP in the game root?", warning: true)) return;
         SetBusy(true, "Packaging current fix...");
         try
         {
             FixPackageResult result = await packager.CreateAsync(plan, new Progress<string>(message => { StatusText.Text = message; Log(message); }));
             Log($"Created {result.ArchivePath} with {result.FileCount} file(s).");
-            MessageBox.Show($"Created {Path.GetFileName(result.ArchivePath)} in the game root.", "Fix package ready", MessageBoxButton.OK, MessageBoxImage.Information);
+            NativeDialog.Info(this, "Fix package ready", $"Created {Path.GetFileName(result.ArchivePath)} in the game root.");
             Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = $"/select,\"{result.ArchivePath}\"", UseShellExecute = true });
         }
         catch (Exception ex) { ShowError("Fix packaging failed", ex); }
@@ -625,11 +624,10 @@ public partial class MainWindow : Window
             {
                 if (interactive)
                 {
-                    MessageBox.Show(
+                    NativeDialog.Info(this, "UCOnline2 updates",
                         artifacts.CurrentVersion == "development"
                             ? $"Development build. Latest regular release: {release.TagName}"
-                            : $"You already have {artifacts.CurrentVersion}.",
-                        "UCOnline2 updates", MessageBoxButton.OK, MessageBoxImage.Information);
+                            : $"You already have {artifacts.CurrentVersion}.");
                 }
                 else
                 {
@@ -638,7 +636,7 @@ public partial class MainWindow : Window
                 return;
             }
             if (release.ReleaseArchive is null) throw new InvalidOperationException("The latest release has no release ZIP.");
-            if (MessageBox.Show($"Download and install {release.TagName}? The selected game can be refreshed with the new DLLs after restart.", "UCOnline2 update available", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+            if (!NativeDialog.Confirm(this, "UCOnline2 update available", $"Download and install {release.TagName}? The selected game can be refreshed with the new DLLs after restart.")) return;
             string archive = await updates.DownloadAsync(release.ReleaseArchive, new Progress<double>(value => Progress.Value = value));
             string executable = Environment.ProcessPath ?? throw new InvalidOperationException("Executable path unavailable.");
             Process.Start(SelfUpdateService.CreateUpdaterStartInfo(
@@ -813,7 +811,40 @@ public partial class MainWindow : Window
     {
         Log($"ERROR: {exception.Message}");
         StatusText.Text = exception.Message;
-        MessageBox.Show(exception.Message, title, MessageBoxButton.OK, MessageBoxImage.Error);
+        NativeDialog.Error(this, title, exception.Message);
+    }
+
+    // coherence multiplayer needs the game's schema uploaded to the user's own
+    // coherence project -- a Unity-Editor-driven flow that lives in the shipped
+    // tools\coherence_schema pipeline. We don't reimplement it; when a coherence
+    // game is scanned we just offer to launch that tool.
+    private void OfferCoherenceSchemaUpload()
+    {
+        if (!NativeDialog.Confirm(this, "coherence game detected",
+                "coherence multiplayer needs the game's network schema uploaded to your own coherence project.\n\n" +
+                "Open the schema upload tool now? It walks you through extracting the schema and uploading it " +
+                "(needs the Unity Editor plus your coherence project ID and token)."))
+            return;
+
+        string? tool = artifacts.FindCoherenceSchemaTool();
+        if (tool is null)
+        {
+            NativeDialog.Warn(this, "Schema tool not found",
+                "The coherence schema tool (tools\\coherence_schema) isn't in this build. " +
+                "Use the full release package, which bundles it.");
+            return;
+        }
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = tool,
+                WorkingDirectory = Path.GetDirectoryName(tool)!,
+                UseShellExecute = true
+            });
+            Log("Launched the coherence schema upload tool.");
+        }
+        catch (Exception ex) { ShowError("Could not launch the schema tool", ex); }
     }
 
     private static bool ContainsUnauthorized(Exception exception)
