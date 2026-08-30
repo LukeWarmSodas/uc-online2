@@ -182,6 +182,8 @@ struct EosConfig
     bool bKeepGameApp;      // [EOS] KeepGameApp: Device ID login on the game's OWN
                             // Epic app, no redirect. WINS even if the app ids below
                             // are filled in.
+    bool bVerboseLog;       // [EOS] VerboseLog: route the EOS SDK's full verbose log
+                            // into the host log. Off by default (warnings+errors only).
     bool bValid;
 };
 static EosConfig g_Cfg = {};
@@ -206,6 +208,10 @@ static void LoadEosConfig()
     // redirect. Deliberately checked BEFORE (and independent of) the app ids, so
     // it wins even when they are filled in.
     g_Cfg.bKeepGameApp = GetPrivateProfileIntA("EOS", "KeepGameApp", 0, ini) != 0;
+
+    // [EOS] VerboseLog=1 -> full EOS SDK verbose log. Off by default; we still
+    // surface warnings+errors so real failures are visible without the spam.
+    g_Cfg.bVerboseLog  = GetPrivateProfileIntA("EOS", "VerboseLog", 0, ini) != 0;
 
     g_Cfg.bValid = g_Cfg.ProductId[0] && g_Cfg.SandboxId[0] && g_Cfg.DeploymentId[0] &&
                    g_Cfg.ClientId[0] && g_Cfg.ClientSecret[0];
@@ -371,8 +377,10 @@ static EOS_HPlatform __cdecl Hooked_Platform_Create(const void* Options)
         if (g_pfn_SetLogCallback) {
             g_pfn_SetLogCallback(&UcoEosLogSink);
             if (g_pfn_SetLogLevel)
-                g_pfn_SetLogLevel(0x7fffffff /*EOS_LC_ALL_CATEGORIES*/, 500 /*EOS_LOG_Verbose*/);
-            LOG("[EOSAuth] EOS SDK logging routed into host log (verbose).");
+                g_pfn_SetLogLevel(0x7fffffff /*EOS_LC_ALL_CATEGORIES*/,
+                                  g_Cfg.bVerboseLog ? 500 /*EOS_LOG_Verbose*/ : 300 /*EOS_LOG_Warning*/);
+            LOG("[EOSAuth] EOS SDK logging routed into host log (%s).",
+                g_Cfg.bVerboseLog ? "verbose" : "warnings+errors -- set [EOS] VerboseLog=1 for full");
         } else {
             LOG("[EOSAuth] EOS_Logging_SetCallback not exported -- SDK internals stay invisible.");
         }
