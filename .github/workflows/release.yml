@@ -91,6 +91,30 @@ jobs:
             }
           }
 
+      - name: Sign Steam API DLLs
+        shell: pwsh
+        run: |
+          # Some games gate on the emulator DLL carrying an embedded Authenticode
+          # signature -- e.g. Risk of Rain 2's SteamApiValidator only checks
+          # CryptQueryObject content-type 10 (a signature is PRESENT), never
+          # WinVerifyTrust, so it does not care that the cert is self-signed or
+          # not Valve's. An unsigned DLL is rejected; any signature passes.
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=UCOnline2" `
+            -CertStoreLocation Cert:\CurrentUser\My -KeyUsage DigitalSignature -KeySpec Signature `
+            -NotAfter (Get-Date).AddYears(20)
+          $dlls = @(
+            "relbuild/x64/steam_api64.dll",
+            "relbuild/x86/steam_api.dll",
+            "debbuild/x64/steam_api64.dll",
+            "debbuild/x86/steam_api.dll"
+          )
+          foreach ($dll in $dlls) {
+            Set-AuthenticodeSignature -FilePath $dll -Certificate $cert | Out-Null
+            $sig = Get-AuthenticodeSignature $dll
+            if (-not $sig.SignerCertificate) { throw "Signing produced no signature on $dll" }
+            Write-Host "signed $dll -> $($sig.Status) / $($sig.SignerCertificate.Subject)"
+          }
+
       - name: Package release zip
         shell: pwsh
         run: |
