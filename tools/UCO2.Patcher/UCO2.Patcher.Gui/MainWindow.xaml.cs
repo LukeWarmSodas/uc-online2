@@ -40,6 +40,7 @@ public partial class MainWindow : Window
     {
         if (!string.IsNullOrWhiteSpace(initialGameDirectory) && Directory.Exists(initialGameDirectory))
             await ScanGameAsync(initialGameDirectory);
+        await CheckForUpdatesAsync(interactive: false);
     }
 
     private async Task ScanGameAsync(string directory)
@@ -610,7 +611,10 @@ public partial class MainWindow : Window
         finally { SetBusy(false); }
     }
 
-    private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
+    private async void CheckUpdates_Click(object sender, RoutedEventArgs e) =>
+        await CheckForUpdatesAsync(interactive: true);
+
+    private async Task CheckForUpdatesAsync(bool interactive)
     {
         SetBusy(true, "Checking GitHub releases...");
         try
@@ -619,17 +623,40 @@ public partial class MainWindow : Window
             ReleaseInfo release = await updates.GetLatestAsync();
             if (!UpdateService.IsNewer(artifacts.CurrentVersion, release.TagName))
             {
-                MessageBox.Show(artifacts.CurrentVersion == "development" ? $"Development build. Latest regular release: {release.TagName}" : $"You already have {artifacts.CurrentVersion}.", "UCOnline2 updates", MessageBoxButton.OK, MessageBoxImage.Information);
+                if (interactive)
+                {
+                    MessageBox.Show(
+                        artifacts.CurrentVersion == "development"
+                            ? $"Development build. Latest regular release: {release.TagName}"
+                            : $"You already have {artifacts.CurrentVersion}.",
+                        "UCOnline2 updates", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    Log($"Startup update check complete. Latest regular release: {release.TagName}.");
+                }
                 return;
             }
             if (release.ReleaseArchive is null) throw new InvalidOperationException("The latest release has no release ZIP.");
             if (MessageBox.Show($"Download and install {release.TagName}? The selected game can be refreshed with the new DLLs after restart.", "UCOnline2 update available", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
             string archive = await updates.DownloadAsync(release.ReleaseArchive, new Progress<double>(value => Progress.Value = value));
             string executable = Environment.ProcessPath ?? throw new InvalidOperationException("Executable path unavailable.");
-            Process.Start(SelfUpdateService.CreateUpdaterStartInfo(archive, AppContext.BaseDirectory, Path.GetFileName(executable), Environment.ProcessId, scan?.GameDirectory));
+            Process.Start(SelfUpdateService.CreateUpdaterStartInfo(
+                archive,
+                executable,
+                artifacts.BaseDirectory,
+                Environment.ProcessId,
+                scan?.GameDirectory,
+                release.TagName));
             Application.Current.Shutdown();
         }
-        catch (Exception ex) { ShowError("Update failed", ex); }
+        catch (Exception ex)
+        {
+            if (interactive)
+                ShowError("Update failed", ex);
+            else
+                Log($"Startup update check failed: {ex.Message}");
+        }
         finally { SetBusy(false); }
     }
 

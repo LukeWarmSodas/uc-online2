@@ -105,32 +105,51 @@ public sealed class UpdateService : IDisposable
 
 public static class SelfUpdateService
 {
-    public static ProcessStartInfo CreateUpdaterStartInfo(string archivePath, string installDirectory, string executableName, int parentProcessId, string? restartGameDirectory)
+    public static ProcessStartInfo CreateUpdaterStartInfo(
+        string archivePath,
+        string executablePath,
+        string artifactDirectory,
+        int parentProcessId,
+        string? restartGameDirectory,
+        string expectedVersion)
     {
         string currentExecutable = Environment.ProcessPath
             ?? throw new InvalidOperationException("The current executable path is unavailable.");
+        string executableDirectory = Path.GetDirectoryName(Path.GetFullPath(executablePath))
+            ?? throw new InvalidOperationException("The executable directory is unavailable.");
         string updaterDirectory = Path.Combine(Path.GetTempPath(), "UCOnline2", "updater", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(updaterDirectory);
         string updaterExecutable = Path.Combine(updaterDirectory, "UCO2.Patcher.Updater.exe");
         File.Copy(currentExecutable, updaterExecutable);
 
-        return new ProcessStartInfo
+        var startInfo = new ProcessStartInfo
         {
             FileName = updaterExecutable,
-            UseShellExecute = true,
-            Arguments = string.Join(' ', new[]
-            {
-                "--apply-update",
-                Quote(archivePath),
-                Quote(installDirectory),
-                Quote(executableName),
-                parentProcessId.ToString(),
-                Quote(restartGameDirectory ?? "")
-            })
+            UseShellExecute = true
         };
+        foreach (string argument in new[]
+        {
+            "--apply-update",
+            archivePath,
+            executableDirectory,
+            Path.GetFullPath(artifactDirectory),
+            Path.GetFileName(executablePath),
+            parentProcessId.ToString(),
+            restartGameDirectory ?? "",
+            expectedVersion
+        })
+            startInfo.ArgumentList.Add(argument);
+        return startInfo;
     }
 
-    public static async Task ApplyAsync(string archivePath, string installDirectory, string executableName, int parentProcessId, string? restartGameDirectory)
+    public static async Task ApplyAsync(
+        string archivePath,
+        string executableDirectory,
+        string artifactDirectory,
+        string executableName,
+        int parentProcessId,
+        string? restartGameDirectory,
+        string expectedVersion)
     {
         try
         {
@@ -139,36 +158,105 @@ public static class SelfUpdateService
         }
         catch (ArgumentException) { }
 
-        string staging = Path.Combine(Path.GetTempPath(), "UCOnline2", "staging", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(staging);
-        // The archive was just downloaded and the parent just exited; Windows
-        // Defender (or the OS releasing the parent's file handles) can still hold
-        // the zip for a moment. Retry instead of failing on the first collision.
-        await RetryOnLockAsync(() => ZipFile.ExtractToDirectory(archivePath, staging, overwriteFiles: true));
-        string? packagedExecutable = SafeFileSystem.EnumerateFiles(staging, executableName).FirstOrDefault();
-        if (packagedExecutable is null)
-            throw new InvalidDataException($"The update archive does not contain {executableName}.");
-        string packageRoot = Path.GetDirectoryName(packagedExecutable)!;
-
-        foreach (string source in SafeFileSystem.EnumerateFiles(packageRoot))
-        {
-            string relative = Path.GetRelativePath(packageRoot, source);
-            string target = Path.Combine(installDirectory, relative);
-            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            // The target may be a DLL the just-exited parent still had mapped;
-            // its handle can linger a beat past WaitForExitAsync.
-            await RetryOnLockAsync(() => File.Copy(source, target, overwrite: true));
-        }
+        string installedExecutable = await InstallPackageAsync(
+            archivePath, executableDirectory, artifactDirectory, executableName, expectedVersion);
 
         var start = new ProcessStartInfo
         {
-            FileName = Path.Combine(installDirectory, executableName),
-            WorkingDirectory = installDirectory,
+            FileName = installedExecutable,
+            WorkingDirectory = executableDirectory,
             UseShellExecute = true
         };
         if (!string.IsNullOrWhiteSpace(restartGameDirectory))
-            start.Arguments = $"--game {Quote(restartGameDirectory)} --refresh-fix";
+        {
+            start.ArgumentList.Add("--game");
+            start.ArgumentList.Add(restartGameDirectory);
+            start.ArgumentList.Add("--refresh-fix");
+        }
         Process.Start(start);
+    }
+
+    public static async Task<string> InstallPackageAsync(
+        string archivePath,
+        string executableDirectory,
+        string artifactDirectory,
+        string executableName,
+        string expectedVersion)
+    {
+        executableDirectory = Path.GetFullPath(executableDirectory);
+        artifactDirectory = Path.GetFullPath(artifactDirectory);
+        Directory.CreateDirectory(executableDirectory);
+        Directory.CreateDirectory(artifactDirectory);
+
+        string staging = Path.Combine(Path.GetTempPath(), "UCOnline2", "staging", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(staging);
+        try
+        {
+            // Defender and recently released file handles can briefly hold the archive.
+            await RetryOnLockAsync(() => ZipFile.ExtractToDirectory(archivePath, staging, overwriteFiles: true));
+            string packageRoot = FindPackageRoot(staging, executableName);
+            string[] sources = SafeFileSystem.EnumerateFiles(packageRoot).ToArray();
+            if (sources.Length == 0)
+                throw new InvalidDataException("The update package is empty.");
+
+            foreach (string source in sources)
+            {
+                string relative = Path.GetRelativePath(packageRoot, source);
+                string destinationRoot = relative.Equals(executableName, StringComparison.OrdinalIgnoreCase)
+                    ? executableDirectory
+                    : artifactDirectory;
+                string target = Path.Combine(destinationRoot, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                await RetryOnLockAsync(() => File.Copy(source, target, overwrite: true));
+                if (!SafeFileSystem.Sha256(source).Equals(SafeFileSystem.Sha256(target), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException($"Update verification failed for {relative}.");
+            }
+
+            string installedVersionPath = Path.Combine(artifactDirectory, "version.txt");
+            string installedVersion = File.Exists(installedVersionPath)
+                ? File.ReadAllText(installedVersionPath).Trim()
+                : "";
+            if (!installedVersion.Equals(expectedVersion, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(
+                    $"The update installed version marker '{installedVersion}', expected '{expectedVersion}'.");
+
+            foreach (string required in new[] { Path.Combine("x64", "steam_api64.dll"), Path.Combine("x86", "steam_api.dll") })
+            {
+                if (!File.Exists(Path.Combine(artifactDirectory, required)))
+                    throw new InvalidDataException($"The updated artifact {required} is missing.");
+            }
+            string pluginDirectory = Path.Combine(artifactDirectory, "plugins");
+            if (!Directory.Exists(pluginDirectory) || !Directory.EnumerateFiles(pluginDirectory, "*.dll").Any())
+                throw new InvalidDataException("The updated plugin DLLs are missing.");
+
+            string installedExecutable = Path.Combine(executableDirectory, executableName);
+            if (!File.Exists(installedExecutable))
+                throw new InvalidDataException($"The updated executable {executableName} is missing.");
+            return installedExecutable;
+        }
+        finally
+        {
+            try { Directory.Delete(staging, recursive: true); } catch { }
+        }
+    }
+
+    private static string FindPackageRoot(string staging, string executableName)
+    {
+        string[] candidates = SafeFileSystem.EnumerateFiles(staging, executableName)
+            .Select(Path.GetDirectoryName)
+            .Where(directory => directory is not null
+                && File.Exists(Path.Combine(directory, "version.txt"))
+                && File.Exists(Path.Combine(directory, "x64", "steam_api64.dll"))
+                && File.Exists(Path.Combine(directory, "x86", "steam_api.dll"))
+                && Directory.Exists(Path.Combine(directory, "plugins")))
+            .Cast<string>()
+            .ToArray();
+        return candidates.Length switch
+        {
+            1 => candidates[0],
+            0 => throw new InvalidDataException("The update archive does not contain a complete UCOnline2 release package."),
+            _ => throw new InvalidDataException("The update archive contains more than one UCOnline2 release package.")
+        };
     }
 
     // Retry a file operation that can transiently fail with "used by another
@@ -190,6 +278,4 @@ public static class SelfUpdateService
             }
         }
     }
-
-    private static string Quote(string value) => $"\"{value.Replace("\"", "\\\"")}\"";
 }

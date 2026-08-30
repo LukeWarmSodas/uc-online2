@@ -27,6 +27,7 @@ internal static class Program
             TestBackendProfiles(root);
             TestBackendValidation(root);
             TestPlayFabPlanning(root);
+            await TestSelfUpdateLayout(root);
             await TestBackupRestoreAndPackage(root);
             Console.WriteLine($"PASS: {passed} tests");
             return 0;
@@ -181,6 +182,48 @@ internal static class Program
         PatchPlan complete = planner.Create(FakeGame(gameRoot), options);
         True(complete.Operations.Any(operation => operation.Description.Contains("playfab_universal", StringComparison.Ordinal)), "Configured PlayFab plugin planned");
         True(!complete.Warnings.Any(warning => warning.Contains("TitleId", StringComparison.Ordinal)), "Configured PlayFab has no TitleId warning");
+        passed++;
+    }
+
+    private static async Task TestSelfUpdateLayout(string root)
+    {
+        string sourceRoot = Path.Combine(root, "UpdateSource");
+        string packageRoot = Path.Combine(sourceRoot, "uc-online2-v9.9.9-release");
+        Directory.CreateDirectory(Path.Combine(packageRoot, "x64"));
+        Directory.CreateDirectory(Path.Combine(packageRoot, "x86"));
+        Directory.CreateDirectory(Path.Combine(packageRoot, "plugins"));
+        File.WriteAllText(Path.Combine(packageRoot, "UCO2.Patcher.exe"), "new-patcher");
+        File.WriteAllText(Path.Combine(packageRoot, "version.txt"), "v9.9.9");
+        File.WriteAllText(Path.Combine(packageRoot, "x64", "steam_api64.dll"), "new-x64");
+        File.WriteAllText(Path.Combine(packageRoot, "x86", "steam_api.dll"), "new-x86");
+        File.WriteAllText(Path.Combine(packageRoot, "plugins", "playfab_universal.dll"), "new-plugin");
+
+        string archive = Path.Combine(root, "update package.zip");
+        ZipFile.CreateFromDirectory(sourceRoot, archive);
+        string executableDirectory = Path.Combine(root, "Nested Executable");
+        string artifactDirectory = Path.Combine(root, "Artifact Root");
+        Directory.CreateDirectory(executableDirectory);
+        Directory.CreateDirectory(artifactDirectory);
+        File.WriteAllText(Path.Combine(executableDirectory, "UCO2.Patcher.exe"), "old-patcher");
+        File.WriteAllText(Path.Combine(artifactDirectory, "version.txt"), "v1.0.0");
+
+        string installedExecutable = await SelfUpdateService.InstallPackageAsync(
+            archive, executableDirectory, artifactDirectory, "UCO2.Patcher.exe", "v9.9.9");
+
+        Equal("new-patcher", File.ReadAllText(installedExecutable), "Updater replaces nested executable");
+        Equal("v9.9.9", File.ReadAllText(Path.Combine(artifactDirectory, "version.txt")), "Updater replaces version marker");
+        Equal("new-x64", File.ReadAllText(Path.Combine(artifactDirectory, "x64", "steam_api64.dll")), "Updater replaces x64 Steam API");
+        Equal("new-x86", File.ReadAllText(Path.Combine(artifactDirectory, "x86", "steam_api.dll")), "Updater replaces x86 Steam API");
+        Equal("new-plugin", File.ReadAllText(Path.Combine(artifactDirectory, "plugins", "playfab_universal.dll")), "Updater replaces plugin DLLs");
+
+        string gameWithSpaces = Path.Combine(root, "Game With Spaces");
+        var startInfo = SelfUpdateService.CreateUpdaterStartInfo(
+            archive, installedExecutable, artifactDirectory, 42, gameWithSpaces, "v9.9.9");
+        Equal(8, startInfo.ArgumentList.Count, "Updater argument count");
+        Equal(archive, startInfo.ArgumentList[1], "Updater archive path with spaces");
+        Equal(artifactDirectory, startInfo.ArgumentList[3], "Updater artifact path with spaces");
+        Equal(gameWithSpaces, startInfo.ArgumentList[6], "Updater game path with spaces");
+        try { Directory.Delete(Path.GetDirectoryName(startInfo.FileName)!, recursive: true); } catch { }
         passed++;
     }
 

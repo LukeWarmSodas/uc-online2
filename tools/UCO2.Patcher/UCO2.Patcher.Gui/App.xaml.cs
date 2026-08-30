@@ -8,11 +8,17 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        if (e.Args.Length >= 6 && e.Args[0].Equals("--apply-update", StringComparison.OrdinalIgnoreCase))
+        if (e.Args.Length > 0 && e.Args[0].Equals("--apply-update", StringComparison.OrdinalIgnoreCase))
         {
+            // Updater mode has no window. Keep WPF alive across awaits until the
+            // package has been copied, verified, and the replacement is started.
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
             try
             {
-                await SelfUpdateService.ApplyAsync(e.Args[1], e.Args[2], e.Args[3], int.Parse(e.Args[4]), e.Args[5]);
+                if (e.Args.Length < 8)
+                    throw new InvalidOperationException("The updater was started without the required release paths.");
+                await SelfUpdateService.ApplyAsync(
+                    e.Args[1], e.Args[2], e.Args[3], e.Args[4], int.Parse(e.Args[5]), e.Args[6], e.Args[7]);
             }
             catch (Exception ex)
             {
