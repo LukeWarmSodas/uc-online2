@@ -193,7 +193,6 @@ internal static class Program
         Directory.CreateDirectory(Path.Combine(packageRoot, "x86"));
         Directory.CreateDirectory(Path.Combine(packageRoot, "plugins"));
         File.WriteAllText(Path.Combine(packageRoot, "UCO2.Patcher.exe"), "new-patcher");
-        File.WriteAllText(Path.Combine(packageRoot, "version.txt"), "v9.9.9");
         File.WriteAllText(Path.Combine(packageRoot, "x64", "steam_api64.dll"), "new-x64");
         File.WriteAllText(Path.Combine(packageRoot, "x86", "steam_api.dll"), "new-x86");
         File.WriteAllText(Path.Combine(packageRoot, "plugins", "playfab_universal.dll"), "new-plugin");
@@ -205,13 +204,11 @@ internal static class Program
         Directory.CreateDirectory(executableDirectory);
         Directory.CreateDirectory(artifactDirectory);
         File.WriteAllText(Path.Combine(executableDirectory, "UCO2.Patcher.exe"), "old-patcher");
-        File.WriteAllText(Path.Combine(artifactDirectory, "version.txt"), "v1.0.0");
 
         string installedExecutable = await SelfUpdateService.InstallPackageAsync(
             archive, executableDirectory, artifactDirectory, "UCO2.Patcher.exe", "v9.9.9");
 
         Equal("new-patcher", File.ReadAllText(installedExecutable), "Updater replaces nested executable");
-        Equal("v9.9.9", File.ReadAllText(Path.Combine(artifactDirectory, "version.txt")), "Updater replaces version marker");
         Equal("new-x64", File.ReadAllText(Path.Combine(artifactDirectory, "x64", "steam_api64.dll")), "Updater replaces x64 Steam API");
         Equal("new-x86", File.ReadAllText(Path.Combine(artifactDirectory, "x86", "steam_api.dll")), "Updater replaces x86 Steam API");
         Equal("new-plugin", File.ReadAllText(Path.Combine(artifactDirectory, "plugins", "playfab_universal.dll")), "Updater replaces plugin DLLs");

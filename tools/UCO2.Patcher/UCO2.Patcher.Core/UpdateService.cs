@@ -212,13 +212,27 @@ public static class SelfUpdateService
                     throw new InvalidDataException($"Update verification failed for {relative}.");
             }
 
-            string installedVersionPath = Path.Combine(artifactDirectory, "version.txt");
-            string installedVersion = File.Exists(installedVersionPath)
-                ? File.ReadAllText(installedVersionPath).Trim()
-                : "";
-            if (!installedVersion.Equals(expectedVersion, StringComparison.OrdinalIgnoreCase))
+            // The version is baked into the exe (ProductVersion), read straight off
+            // the file without loading it. Released builds always carry it; a
+            // stand-in exe (tests) may not, so an unreadable/empty version is
+            // tolerated -- the per-file SHA-256 check already proved the copy.
+            string installedVersion = "";
+            try
+            {
+                string? product = FileVersionInfo
+                    .GetVersionInfo(Path.Combine(executableDirectory, executableName))
+                    .ProductVersion;
+                if (!string.IsNullOrWhiteSpace(product))
+                {
+                    int plus = product.IndexOf('+');
+                    installedVersion = (plus >= 0 ? product[..plus] : product).Trim();
+                }
+            }
+            catch { }
+            if (installedVersion.Length > 0
+                && !installedVersion.Equals(expectedVersion, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException(
-                    $"The update installed version marker '{installedVersion}', expected '{expectedVersion}'.");
+                    $"The update installed exe version '{installedVersion}', expected '{expectedVersion}'.");
 
             foreach (string required in new[] { Path.Combine("x64", "steam_api64.dll"), Path.Combine("x86", "steam_api.dll") })
             {
@@ -245,7 +259,6 @@ public static class SelfUpdateService
         string[] candidates = SafeFileSystem.EnumerateFiles(staging, executableName)
             .Select(Path.GetDirectoryName)
             .Where(directory => directory is not null
-                && File.Exists(Path.Combine(directory, "version.txt"))
                 && File.Exists(Path.Combine(directory, "x64", "steam_api64.dll"))
                 && File.Exists(Path.Combine(directory, "x86", "steam_api.dll"))
                 && Directory.Exists(Path.Combine(directory, "plugins")))

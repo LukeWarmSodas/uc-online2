@@ -64,9 +64,9 @@ jobs:
           dotnet publish tools/UCO2.Patcher/UCO2.Patcher.Gui/UCO2.Patcher.Gui.csproj `
             -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:InformationalVersion=${{ github.ref_name }} `
             -p:DebugType=None -o tools/UCO2.Patcher/publish
           if ($LASTEXITCODE -ne 0) { throw "GUI patcher publish failed" }
-          Set-Content -LiteralPath tools/UCO2.Patcher/publish/version.txt -Value "${{ github.ref_name }}" -NoNewline
 
       - name: Verify build outputs
         shell: pwsh
@@ -77,8 +77,7 @@ jobs:
             "debbuild/x86/steam_api.dll",
             "debbuild/x64/steam_api64.dll",
             "plugins/steam_overlay/relbuild/x64/overlay_proxy.dll",
-            "tools/UCO2.Patcher/publish/UCO2.Patcher.exe",
-            "tools/UCO2.Patcher/publish/version.txt"
+            "tools/UCO2.Patcher/publish/UCO2.Patcher.exe"
           )
 
           foreach ($file in $files) {
@@ -112,7 +111,6 @@ jobs:
             Copy-Item "patch.bat" "$packageRootrel/patch.bat" -Force
           }
           Copy-Item "tools/UCO2.Patcher/publish/UCO2.Patcher.exe" "$packageRootrel/UCO2.Patcher.exe" -Force
-          Copy-Item "tools/UCO2.Patcher/publish/version.txt" "$packageRootrel/version.txt" -Force
 
           # coherence schema pipeline. Needs the Unity editor, so it is a
           # separate opt-in tool rather than something patch.bat can run --
@@ -153,7 +151,6 @@ jobs:
             Copy-Item "patch.bat" "$packageRootdeb/patch.bat" -Force
           }
           Copy-Item "tools/UCO2.Patcher/publish/UCO2.Patcher.exe" "$packageRootdeb/UCO2.Patcher.exe" -Force
-          Copy-Item "tools/UCO2.Patcher/publish/version.txt" "$packageRootdeb/version.txt" -Force
 
           if (Test-Path $archivePathdeb) {
             Remove-Item $archivePathdeb -Force

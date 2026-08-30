@@ -41,9 +41,9 @@ jobs:
           dotnet publish tools/UCO2.Patcher/UCO2.Patcher.Gui/UCO2.Patcher.Gui.csproj `
             -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:InformationalVersion=pr-${{ github.event.pull_request.number }} `
             -p:DebugType=None -o tools/UCO2.Patcher/publish
           if ($LASTEXITCODE -ne 0) { throw "GUI patcher publish failed" }
-          Set-Content -LiteralPath tools/UCO2.Patcher/publish/version.txt -Value "pr-${{ github.event.pull_request.number }}" -NoNewline
 
       - name: Verify build outputs
         shell: pwsh
@@ -53,8 +53,7 @@ jobs:
             "relbuild/x64/steam_api64.dll",
             "debbuild/x86/steam_api.dll",
             "debbuild/x64/steam_api64.dll",
-            "tools/UCO2.Patcher/publish/UCO2.Patcher.exe",
-            "tools/UCO2.Patcher/publish/version.txt"
+            "tools/UCO2.Patcher/publish/UCO2.Patcher.exe"
           )
 
           foreach ($file in $files) {
@@ -76,7 +75,6 @@ jobs:
           Copy-Item "relbuild/x64/steam_api64.dll" "$packageRoot/x64/steam_api64.dll"
           Copy-Item "patch.bat" "$packageRoot/patch.bat" -Force
           Copy-Item "tools/UCO2.Patcher/publish/UCO2.Patcher.exe" "$packageRoot/UCO2.Patcher.exe" -Force
-          Copy-Item "tools/UCO2.Patcher/publish/version.txt" "$packageRoot/version.txt" -Force
 
           if (Test-Path $archivePath) {
             Remove-Item $archivePath -Force
@@ -97,7 +95,6 @@ jobs:
           Copy-Item "debbuild/x64/steam_api64.dll" "$packageRootdeb/x64/steam_api64.dll"
           Copy-Item "patch.bat" "$packageRootdeb/patch.bat" -Force
           Copy-Item "tools/UCO2.Patcher/publish/UCO2.Patcher.exe" "$packageRootdeb/UCO2.Patcher.exe" -Force
-          Copy-Item "tools/UCO2.Patcher/publish/version.txt" "$packageRootdeb/version.txt" -Force
 
           if (Test-Path $archivePathdeb) {
             Remove-Item $archivePathdeb -Force
