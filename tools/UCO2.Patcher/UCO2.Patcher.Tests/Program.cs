@@ -24,6 +24,9 @@ internal static class Program
             TestSteamVdfParsing();
             TestSteamStoreSearch();
             TestConfigFlags(root);
+            TestBackendProfiles(root);
+            TestBackendValidation(root);
+            TestPlayFabPlanning(root);
             await TestBackupRestoreAndPackage(root);
             Console.WriteLine($"PASS: {passed} tests");
             return 0;
@@ -53,6 +56,14 @@ internal static class Program
         Equal(2, results.Count, "Steam result count");
         Equal((uint)3164500, results[0].AppId, "Steam result AppId");
         Equal((uint)3164500, SteamStoreSearchService.FindBestMatch(@"C:\Games\Schedule.I", results)!.AppId, "Exact Steam match");
+
+        const string detailsJson = """
+            {"3164500":{"success":true,"data":{"type":"game","name":"Schedule I","header_image":"https://example.invalid/header.jpg"}}}
+            """;
+        using var detailsStream = new MemoryStream(Encoding.UTF8.GetBytes(detailsJson));
+        SteamSearchResult? details = SteamStoreSearchService.ParseAppDetails(detailsStream, 3164500);
+        Equal("Schedule I", details!.Name, "Manual AppId name");
+        Equal((uint)3164500, details.AppId, "Manual AppId result");
         passed++;
     }
 
@@ -88,6 +99,88 @@ internal static class Program
         True(config.Contains("PassthroughTicket=true"), "Passthrough flag");
         True(config.Contains("Client=017"), "Client flag");
         True(config.Contains("CustomFlag=yes"), "Custom flag");
+        passed++;
+    }
+
+    private static void TestBackendProfiles(string root)
+    {
+        string path = Path.Combine(root, "backend-profiles.dat");
+        var store = new BackendProfileStore(path);
+        var options = new PatchOptions
+        {
+            OriginalAppId = 123,
+            InstallPhoton = true,
+            PhotonRealtimeAppId = "photon-realtime",
+            PhotonVoiceAppId = "photon-voice",
+            InstallEos = true,
+            EosProductId = "eos-product",
+            EosSandboxId = "eos-sandbox",
+            EosDeploymentId = "eos-deployment",
+            EosClientId = "eos-client",
+            EosClientSecret = "super-secret",
+            DisplayName = "Player One",
+            InstallPlayFab = true,
+            PlayFabTitleId = "ABCDE"
+        };
+
+        IReadOnlyList<string> saved = store.SaveFrom(options);
+        Equal(3, saved.Count, "Saved backend profile count");
+        True(!Encoding.UTF8.GetString(File.ReadAllBytes(path)).Contains("super-secret", StringComparison.Ordinal), "Backend profile encrypted at rest");
+
+        BackendProfiles profiles = store.Load(out string? warning);
+        True(warning is null, "Backend profile decrypt warning");
+        Equal("photon-realtime", profiles.Photon!.RealtimeAppId, "Remembered Photon AppId");
+        Equal("super-secret", profiles.Eos!.ClientSecret, "Remembered EOS secret");
+        Equal("ABCDE", profiles.PlayFab!.TitleId, "Remembered PlayFab TitleId");
+        passed++;
+    }
+
+    private static void TestBackendValidation(string root)
+    {
+        GameScanResult game = FakeGame(root);
+        var selected = new PatchOptions
+        {
+            InstallPhoton = true,
+            InstallEos = true,
+            InstallPlayFab = true
+        };
+        IReadOnlyList<MissingBackendSettings> missing = BackendSettingsValidator.FindMissing(game, selected);
+        Equal(3, missing.Count, "All selected backends require settings");
+        True(missing.Any(item => item.Backend == "Photon"), "Photon requirement");
+        True(missing.Any(item => item.Backend == "EOS"), "EOS requirement");
+        True(missing.Any(item => item.Backend == "PlayFab"), "PlayFab requirement");
+
+        var disabled = new PatchOptions();
+        Equal(0, BackendSettingsValidator.FindMissing(game, disabled).Count, "Disabled backends require no settings");
+        passed++;
+    }
+
+    private static void TestPlayFabPlanning(string root)
+    {
+        string artifactRoot = Path.Combine(root, "PlannerArtifacts");
+        string gameRoot = Path.Combine(root, "PlannerGame");
+        Directory.CreateDirectory(Path.Combine(artifactRoot, "x64"));
+        Directory.CreateDirectory(Path.Combine(artifactRoot, "plugins"));
+        Directory.CreateDirectory(gameRoot);
+        File.WriteAllBytes(Path.Combine(artifactRoot, "x64", "steam_api64.dll"), [1]);
+        File.WriteAllBytes(Path.Combine(artifactRoot, "plugins", "playfab_universal.dll"), [2]);
+
+        var planner = new PatchPlanner(new ArtifactLocator(artifactRoot));
+        var options = new PatchOptions
+        {
+            OriginalAppId = 123,
+            InstallOverlayProxy = false,
+            InstallPlayFab = true
+        };
+
+        PatchPlan incomplete = planner.Create(FakeGame(gameRoot), options);
+        True(incomplete.Warnings.Any(warning => warning.Contains("TitleId is empty", StringComparison.Ordinal)), "Empty PlayFab TitleId warning");
+        True(!incomplete.Operations.Any(operation => operation.Description.Contains("playfab_universal", StringComparison.Ordinal)), "Empty PlayFab TitleId skips plugin");
+
+        options.PlayFabTitleId = "ABCDE";
+        PatchPlan complete = planner.Create(FakeGame(gameRoot), options);
+        True(complete.Operations.Any(operation => operation.Description.Contains("playfab_universal", StringComparison.Ordinal)), "Configured PlayFab plugin planned");
+        True(!complete.Warnings.Any(warning => warning.Contains("TitleId", StringComparison.Ordinal)), "Configured PlayFab has no TitleId warning");
         passed++;
     }
 

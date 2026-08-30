@@ -46,7 +46,13 @@ public sealed class PatchPlanner(ArtifactLocator artifacts)
                 if (complete) AddPlugin("EOS_custom", game, operations);
                 else warnings.Add("EOS was selected but its credentials are incomplete, so EOS_custom will not be installed.");
             }
-            if (options.InstallPlayFab) AddPlugin("playfab_universal", game, operations);
+            if (options.InstallPlayFab)
+            {
+                if (!string.IsNullOrWhiteSpace(options.PlayFabTitleId))
+                    AddPlugin("playfab_universal", game, operations);
+                else
+                    warnings.Add("PlayFab was selected but its TitleId is empty, so playfab_universal will not be installed.");
+            }
             if (options.InstallCoherence) AddPlugin("coherence_universal", game, operations);
         }
         else if (options.InstallPhoton || options.InstallEos || options.InstallPlayFab || options.InstallCoherence)

@@ -117,7 +117,11 @@ public sealed class PatchOptions
     public string EosClientId { get; set; } = "";
     public string EosClientSecret { get; set; } = "";
     public string DisplayName { get; set; } = "Player";
+    // Device ID login on the game's OWN Epic app (no redirect); wins over the ids above.
+    public bool EosKeepGameApp { get; set; }
     public string PlayFabTitleId { get; set; } = "";
+    // Anonymous login on the game's OWN PlayFab title (no redirect); wins over TitleId.
+    public bool PlayFabKeepGameTitle { get; set; }
     public string CoherenceRuntimeKey { get; set; } = "";
     public string LegacyClientVersion { get; set; } = "";
     public Dictionary<string, string> AdditionalSettings { get; set; } = new(StringComparer.OrdinalIgnoreCase);

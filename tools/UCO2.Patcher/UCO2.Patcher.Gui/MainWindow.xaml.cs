@@ -15,9 +15,14 @@ public partial class MainWindow : Window
     private readonly BackupService backups = new();
     private readonly InstalledFixService installedFixes = new();
     private readonly FixPackager packager = new();
+    private readonly BackendProfileStore backendProfiles = new();
     private readonly string? initialGameDirectory;
     private bool refreshFixAfterUpdate;
     private bool loadingSteamMatches;
+    private bool busy;
+    private bool advancedExpandedForBackendNotice;
+    private string normalStatus = "Choose a game folder to begin";
+    private CancellationTokenSource? appIdLookupCancellation;
     private GameScanResult? scan;
     private PatchPlan? plan;
 
@@ -56,21 +61,26 @@ public partial class MainWindow : Window
             SteamStubValue.Text = scan.SteamStub.ToString();
             WarningList.ItemsSource = scan.Warnings;
 
+            loadingSteamMatches = true;
             LoadConfiguration(scan, null);
+            loadingSteamMatches = false;
+            SelectDetectedBackendPlugins(scan);
             await SearchSteamAsync(scan.GameDirectory);
+            OfferSavedBackendSettings();
             await RefreshBackupsAsync();
             RefreshPlan(selectChangesTab: false);
             ApplyButton.IsEnabled = true;
             Log($"Scanned {scan.GameDirectory}: {scan.EngineLabel}, {scan.BackendLabel}.");
-            StatusText.Text = "Preflight complete";
+            SetNormalStatus("Preflight complete");
 
-            // EOS needs the user's own Epic app credentials -- surface them up front.
-            UpdateEosPrompt();
-            if (EosCheck.IsChecked == true && EosCredentialsMissing())
+            UpdateBackendPrompts();
+            IReadOnlyList<MissingBackendSettings> missingBackends = GetMissingBackendSettings();
+            if (missingBackends.Count > 0)
             {
-                AdvancedExpander.IsExpanded = true;
-                StatusText.Text = "EOS detected - enter your Epic app credentials under Advanced settings.";
-                Log("EOS backend detected. Enter your Epic app ProductId / SandboxId / DeploymentId / ClientId / ClientSecret in Advanced settings before applying.");
+                ExpandAdvancedForBackendNotice();
+                string names = string.Join(", ", missingBackends.Select(item => item.Backend));
+                SetNormalStatus($"{names} detected - fill the required plugin fields or turn those plugins off.");
+                Log($"Required backend settings are missing for {names}. Fill them under Advanced settings or disable those plugins.");
             }
 
             if (refreshFixAfterUpdate)
@@ -85,14 +95,42 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            scan = null;
             plan = null;
-            ApplyButton.IsEnabled = false;
             UpdateFixButton.IsEnabled = false;
             PackageButton.IsEnabled = false;
-            ShowError("Game scan failed", ex);
+            if (scan is null)
+            {
+                ApplyButton.IsEnabled = false;
+                ShowError("Game scan failed", ex);
+            }
+            else
+            {
+                ApplyButton.IsEnabled = true;
+                string warning = $"Preflight needs attention: {ex.Message}";
+                WarningList.ItemsSource = scan.Warnings.Append(warning).ToArray();
+                Log($"PREFLIGHT WARNING: {ex.Message}");
+                SetNormalStatus(warning);
+            }
         }
-        finally { SetBusy(false); }
+        finally
+        {
+            SetBusy(false);
+            if (scan is not null)
+            {
+                SelectDetectedBackendPlugins(scan);
+                UpdateBackendPrompts();
+                RefreshNormalStatus();
+            }
+        }
+    }
+
+    private void SelectDetectedBackendPlugins(GameScanResult game)
+    {
+        if (game.Backends.HasFlag(BackendKind.PhotonRealtime) || game.Backends.HasFlag(BackendKind.PhotonFusion))
+            PhotonCheck.IsChecked = true;
+        if (game.Backends.HasFlag(BackendKind.Eos)) EosCheck.IsChecked = true;
+        if (game.Backends.HasFlag(BackendKind.PlayFab)) PlayFabCheck.IsChecked = true;
+        if (game.Backends.HasFlag(BackendKind.Coherence)) CoherenceCheck.IsChecked = true;
     }
 
     private async Task SearchSteamAsync(string gameDirectory)
@@ -108,12 +146,22 @@ public partial class MainWindow : Window
             SteamSearchResult? match = uint.TryParse(existingAppId, out uint configuredAppId)
                 ? results.FirstOrDefault(result => result.AppId == configuredAppId)
                 : null;
+            if (match is null && configuredAppId > 0)
+            {
+                SteamSearchResult? configured = await steamStore.LookupAppAsync(configuredAppId);
+                if (configured is not null)
+                {
+                    results = [configured, .. results.Where(result => result.AppId != configured.AppId)];
+                    SteamMatchBox.ItemsSource = results;
+                    match = configured;
+                }
+            }
             match ??= SteamStoreSearchService.FindBestMatch(gameDirectory, results);
             SteamMatchBox.SelectedItem = match;
             if (match is not null)
             {
                 if (!uint.TryParse(existingAppId, out _))
-                    OriginalAppIdBox.Text = match.AppId.ToString();
+                    SetOriginalAppId(match.AppId);
                 SelectedTitle.Text = match.Name;
                 SteamSearchStatus.Text = $"{results.Count} match(es) found; verify the selected AppId";
                 Log($"Steam Store matched '{term}' to {match.Name} ({match.AppId}).");
@@ -174,7 +222,9 @@ public partial class MainWindow : Window
         EosClientBox.Text = ini.Get("EOS", "ClientId");
         EosSecretBox.Password = ini.Get("EOS", "ClientSecret");
         DisplayNameBox.Text = ini.Get("EOS", "DisplayName", "Player");
+        EosKeepGameAppCheck.IsChecked = ini.GetBool("EOS", "KeepGameApp");
         PlayFabTitleBox.Text = ini.Get("PlayFab", "TitleId");
+        PlayFabKeepGameTitleCheck.IsChecked = ini.GetBool("PlayFab", "KeepGameTitle");
         CoherenceKeyBox.Text = ini.Get("Coherence", "RuntimeKey");
 
         string[] known =
@@ -224,7 +274,9 @@ public partial class MainWindow : Window
             EosClientId = EosClientBox.Text,
             EosClientSecret = EosSecretBox.Password,
             DisplayName = DisplayNameBox.Text,
+            EosKeepGameApp = EosKeepGameAppCheck.IsChecked == true,
             PlayFabTitleId = PlayFabTitleBox.Text,
+            PlayFabKeepGameTitle = PlayFabKeepGameTitleCheck.IsChecked == true,
             CoherenceRuntimeKey = CoherenceKeyBox.Text,
             LegacyClientVersion = LegacyClientBox.Text
         };
@@ -257,61 +309,198 @@ public partial class MainWindow : Window
         int stale = statuses.Count(status => !status.Current);
         UpdateFixButton.IsEnabled = stale > 0;
         PackageButton.IsEnabled = statuses.Any(status => status.Exists);
-        StatusText.Text = stale == 0 ? "Installed fix is current" : $"{stale} installed file(s) need an update";
+        SetNormalStatus(stale == 0 ? "Installed fix is current" : $"{stale} installed file(s) need an update");
         if (selectChangesTab) MainTabs.SelectedIndex = 0; // Changes is the first details tab now
     }
 
     // The Changes/Backups/Activity strip stays hidden until the user reviews.
     private void RevealDetails(int tab = 0)
     {
-        MainTabs.Visibility = Visibility.Visible;
+        DetailsExpander.Visibility = Visibility.Visible;
+        DetailsExpander.IsExpanded = true;
         MainTabs.SelectedIndex = tab;
     }
 
-    // EOS_custom needs the user's OWN Epic app; without these it must not deploy.
-    private bool EosCredentialsMissing() =>
-        string.IsNullOrWhiteSpace(EosProductBox.Text)
-        || string.IsNullOrWhiteSpace(EosSandboxBox.Text)
-        || string.IsNullOrWhiteSpace(EosDeploymentBox.Text)
-        || string.IsNullOrWhiteSpace(EosClientBox.Text)
-        || string.IsNullOrWhiteSpace(EosSecretBox.Password);
-
-    private void EosField_Changed(object sender, System.Windows.Controls.TextChangedEventArgs e) => UpdateEosPrompt();
-    private void EosSecret_Changed(object sender, RoutedEventArgs e) => UpdateEosPrompt();
-    private void EosCheck_Toggled(object sender, RoutedEventArgs e)
+    private void BackendField_Changed(object sender, System.Windows.Controls.TextChangedEventArgs e)
     {
-        UpdateEosPrompt();
-        if (EosCheck.IsChecked == true && EosCredentialsMissing())
-            AdvancedExpander.IsExpanded = true; // surface the required group
+        UpdateBackendPrompts();
+        RefreshNormalStatus();
     }
 
-    // Paint the EOS group yellow + show the REQUIRED badge while its credentials
-    // are needed; clear it live as the user fills them in.
-    private void UpdateEosPrompt()
+    private void EosSecret_Changed(object sender, RoutedEventArgs e)
     {
-        if (EosCredsGroup is null) return; // fires during InitializeComponent
-        bool needed = EosCheck.IsChecked == true && EosCredentialsMissing();
-        EosRequiredBadge.Visibility = needed ? Visibility.Visible : Visibility.Collapsed;
-        EosCredsGroup.BorderBrush = (System.Windows.Media.Brush)FindResource(needed ? "WarnBrush" : "BorderBrush");
-        EosCredsGroup.Background = (System.Windows.Media.Brush)FindResource(needed ? "WarnBgBrush" : "PanelAltBrush");
+        UpdateBackendPrompts();
+        RefreshNormalStatus();
+    }
+
+    private void BackendCheck_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (!busy && scan is not null)
+        {
+            try
+            {
+                RefreshPlan(selectChangesTab: false);
+            }
+            catch (Exception ex)
+            {
+                plan = null;
+                Log($"Could not refresh the patch plan after changing a plugin: {ex.Message}");
+            }
+        }
+
+        UpdateBackendPrompts();
+        if (GetMissingBackendSettings().Count > 0)
+        {
+            ExpandAdvancedForBackendNotice();
+        }
+        else if (advancedExpandedForBackendNotice)
+        {
+            AdvancedExpander.IsExpanded = false;
+            advancedExpandedForBackendNotice = false;
+        }
+        RefreshNormalStatus();
+    }
+
+    private void ExpandAdvancedForBackendNotice()
+    {
+        if (AdvancedExpander.IsExpanded) return;
+        AdvancedExpander.IsExpanded = true;
+        advancedExpandedForBackendNotice = true;
+    }
+
+    private IReadOnlyList<MissingBackendSettings> GetMissingBackendSettings()
+    {
+        if (scan is null) return [];
+        var options = new PatchOptions
+        {
+            InstallPhoton = PhotonCheck.IsChecked == true,
+            PhotonRealtimeAppId = PhotonRealtimeBox.Text,
+            PhotonFusionAppId = PhotonFusionBox.Text,
+            PhotonVoiceAppId = PhotonVoiceBox.Text,
+            InstallEos = EosCheck.IsChecked == true,
+            EosProductId = EosProductBox.Text,
+            EosSandboxId = EosSandboxBox.Text,
+            EosDeploymentId = EosDeploymentBox.Text,
+            EosClientId = EosClientBox.Text,
+            EosClientSecret = EosSecretBox.Password,
+            EosKeepGameApp = EosKeepGameAppCheck.IsChecked == true,
+            InstallPlayFab = PlayFabCheck.IsChecked == true,
+            PlayFabTitleId = PlayFabTitleBox.Text,
+            PlayFabKeepGameTitle = PlayFabKeepGameTitleCheck.IsChecked == true
+        };
+        return BackendSettingsValidator.FindMissing(scan, options);
+    }
+
+    private void UpdateBackendPrompts()
+    {
+        if (EosCredsGroup is null || PhotonCredsGroup is null || PlayFabCredsGroup is null) return;
+        HashSet<string> missing = GetMissingBackendSettings().Select(item => item.Backend).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        SetBackendGroupState(EosCredsGroup, EosRequiredBadge, missing.Contains("EOS"));
+        SetBackendGroupState(PhotonCredsGroup, PhotonRequiredBadge, missing.Contains("Photon"));
+        SetBackendGroupState(PlayFabCredsGroup, PlayFabRequiredBadge, missing.Contains("PlayFab"));
+    }
+
+    private void SetBackendGroupState(System.Windows.Controls.Border group, UIElement badge, bool needed)
+    {
+        badge.Visibility = needed ? Visibility.Visible : Visibility.Collapsed;
+        group.BorderBrush = (System.Windows.Media.Brush)FindResource(needed ? "WarnBrush" : "BorderBrush");
+        group.Background = (System.Windows.Media.Brush)FindResource(needed ? "WarnBgBrush" : "PanelAltBrush");
+    }
+
+    private bool ValidateSelectedBackendSettings()
+    {
+        IReadOnlyList<MissingBackendSettings> missing = GetMissingBackendSettings();
+        UpdateBackendPrompts();
+        if (missing.Count == 0) return true;
+
+        AdvancedExpander.IsExpanded = true;
+        advancedExpandedForBackendNotice = true;
+        string details = string.Join(Environment.NewLine, missing.Select(item =>
+            $"- {item.Backend}: {string.Join(", ", item.Fields)}"));
+        MessageBox.Show(
+            "The selected plugins need these fields before they can be installed:\n\n" + details +
+            "\n\nFill the fields under Advanced settings, or turn off any plugin you do not want.",
+            "Plugin settings required", MessageBoxButton.OK, MessageBoxImage.Warning);
+        return false;
+    }
+
+    private void OfferSavedBackendSettings()
+    {
+        BackendProfiles profiles = backendProfiles.Load(out string? warning);
+        if (warning is not null)
+        {
+            Log(warning);
+            return;
+        }
+
+        bool offerPhoton = PhotonCheck.IsChecked == true && profiles.Photon is not null
+            && (NeedsSavedValue(PhotonRealtimeBox.Text, profiles.Photon.RealtimeAppId)
+                || NeedsSavedValue(PhotonFusionBox.Text, profiles.Photon.FusionAppId)
+                || NeedsSavedValue(PhotonVoiceBox.Text, profiles.Photon.VoiceAppId));
+        bool offerEos = EosCheck.IsChecked == true && profiles.Eos is not null
+            && (NeedsSavedValue(EosProductBox.Text, profiles.Eos.ProductId)
+                || NeedsSavedValue(EosSandboxBox.Text, profiles.Eos.SandboxId)
+                || NeedsSavedValue(EosDeploymentBox.Text, profiles.Eos.DeploymentId)
+                || NeedsSavedValue(EosClientBox.Text, profiles.Eos.ClientId)
+                || NeedsSavedValue(EosSecretBox.Password, profiles.Eos.ClientSecret)
+                || NeedsSavedValue(DisplayNameBox.Text, profiles.Eos.DisplayName));
+        bool offerPlayFab = PlayFabCheck.IsChecked == true && profiles.PlayFab is not null
+            && NeedsSavedValue(PlayFabTitleBox.Text, profiles.PlayFab.TitleId);
+
+        var available = new List<string>();
+        if (offerPhoton) available.Add("Photon");
+        if (offerEos) available.Add("EOS");
+        if (offerPlayFab) available.Add("PlayFab");
+        if (available.Count == 0) return;
+
+        string names = string.Join(", ", available);
+        MessageBoxResult answer = MessageBox.Show(
+            $"Saved settings are available for {names}.\n\nUse them to fill the blank fields for this game? Existing values will not be changed.",
+            "Use saved backend settings", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (answer != MessageBoxResult.Yes) return;
+
+        if (offerPhoton)
+        {
+            FillBlank(PhotonRealtimeBox, profiles.Photon!.RealtimeAppId);
+            FillBlank(PhotonFusionBox, profiles.Photon.FusionAppId);
+            FillBlank(PhotonVoiceBox, profiles.Photon.VoiceAppId);
+        }
+        if (offerEos)
+        {
+            FillBlank(EosProductBox, profiles.Eos!.ProductId);
+            FillBlank(EosSandboxBox, profiles.Eos.SandboxId);
+            FillBlank(EosDeploymentBox, profiles.Eos.DeploymentId);
+            FillBlank(EosClientBox, profiles.Eos.ClientId);
+            if (string.IsNullOrWhiteSpace(EosSecretBox.Password)) EosSecretBox.Password = profiles.Eos.ClientSecret;
+            FillBlank(DisplayNameBox, profiles.Eos.DisplayName);
+        }
+        if (offerPlayFab) FillBlank(PlayFabTitleBox, profiles.PlayFab!.TitleId);
+        UpdateBackendPrompts();
+        Log($"Loaded saved encrypted backend settings for {names}; existing fields were preserved.");
+    }
+
+    private static bool NeedsSavedValue(string current, string saved) =>
+        string.IsNullOrWhiteSpace(current) && !string.IsNullOrWhiteSpace(saved);
+
+    private static void FillBlank(System.Windows.Controls.TextBox field, string saved)
+    {
+        if (string.IsNullOrWhiteSpace(field.Text) && !string.IsNullOrWhiteSpace(saved)) field.Text = saved;
     }
 
     private async Task ApplyPlanAsync(string actionName)
     {
         if (scan is null) return;
-        RefreshPlan(selectChangesTab: false);
-        if (plan is null) return;
-
-        if (EosCheck.IsChecked == true && EosCredentialsMissing())
+        if (!ValidateSelectedBackendSettings()) return;
+        try
         {
-            AdvancedExpander.IsExpanded = true;
-            MessageBox.Show(
-                "EOS is enabled but your Epic app credentials are missing.\n\n" +
-                "Enter ProductId, SandboxId, DeploymentId, ClientId and ClientSecret under " +
-                "Advanced settings — or turn EOS off.",
-                "EOS credentials required", MessageBoxButton.OK, MessageBoxImage.Warning);
+            RefreshPlan(selectChangesTab: false);
+        }
+        catch (Exception ex)
+        {
+            ShowError("Cannot build patch plan", ex);
             return;
         }
+        if (plan is null) return;
 
         var review = new ReviewWindow(plan, SelectedTitle.Text, actionName) { Owner = this };
         if (review.ShowDialog() != true) return;
@@ -323,10 +512,26 @@ public partial class MainWindow : Window
             var progress = new Progress<string>(message => { StatusText.Text = message; Log(message); });
             BackupManifest manifest = await backups.ApplyAsync(plan, progress);
             Log($"Patch complete. Snapshot {manifest.Id} contains {manifest.Entries.Count} operation(s).");
+            string? profileWarning = null;
+            try
+            {
+                IReadOnlyList<string> savedProfiles = backendProfiles.SaveFrom(plan.Options);
+                if (savedProfiles.Count > 0)
+                    Log($"Saved encrypted backend settings for {string.Join(", ", savedProfiles)} after the verified patch.");
+            }
+            catch (Exception ex)
+            {
+                profileWarning = ex.Message;
+                Log($"Backend settings were not saved: {ex.Message}");
+            }
             await RefreshBackupsAsync();
             RefreshPlan(selectChangesTab: false);
-            StatusText.Text = "Patch completed and verified";
-            MessageBox.Show("The fix was backed up, installed, and verified.", "UCOnline2", MessageBoxButton.OK, MessageBoxImage.Information);
+            SetNormalStatus("Patch completed and verified");
+            string completion = profileWarning is null
+                ? "The fix was backed up, installed, and verified."
+                : $"The fix was backed up, installed, and verified.\n\nSaved backend settings could not be updated: {profileWarning}";
+            MessageBox.Show(completion, "UCOnline2", MessageBoxButton.OK,
+                profileWarning is null ? MessageBoxImage.Information : MessageBoxImage.Warning);
         }
         catch (Exception ex)
         {
@@ -357,7 +562,18 @@ public partial class MainWindow : Window
         try
         {
             RefreshPlan(selectChangesTab: false);
-            if (plan is not null) RevealDetails(0); // reveal the Changes strip inline
+            if (plan is null) return;
+
+            if (DetailsExpander.Visibility == Visibility.Visible
+                && DetailsExpander.IsExpanded
+                && MainTabs.SelectedIndex == 0)
+            {
+                DetailsExpander.IsExpanded = false;
+            }
+            else
+            {
+                RevealDetails(0);
+            }
         }
         catch (Exception ex) { ShowError("Cannot build patch plan", ex); }
     }
@@ -437,11 +653,76 @@ public partial class MainWindow : Window
     private void SteamMatchBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         if (loadingSteamMatches || SteamMatchBox.SelectedItem is not SteamSearchResult match) return;
-        OriginalAppIdBox.Text = match.AppId.ToString();
+        SetOriginalAppId(match.AppId);
         SelectedTitle.Text = match.Name;
         SteamSearchStatus.Text = $"Selected {match.Name} ({match.AppId})";
-        try { RefreshPlan(selectChangesTab: false); }
+        try
+        {
+            RefreshPlan(selectChangesTab: false);
+            RefreshNormalStatus();
+        }
         catch (Exception ex) { ShowError("Cannot update AppId", ex); }
+    }
+
+    private async void OriginalAppIdBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        if (OriginalAppIdPlaceholder is not null)
+            OriginalAppIdPlaceholder.Visibility = string.IsNullOrWhiteSpace(OriginalAppIdBox.Text) ? Visibility.Visible : Visibility.Collapsed;
+        if (loadingSteamMatches) return;
+
+        appIdLookupCancellation?.Cancel();
+        appIdLookupCancellation?.Dispose();
+        appIdLookupCancellation = new CancellationTokenSource();
+        CancellationToken cancellationToken = appIdLookupCancellation.Token;
+
+        string raw = OriginalAppIdBox.Text.Trim();
+        if (!uint.TryParse(raw, out uint appId) || appId == 0)
+        {
+            SteamSearchStatus.Text = raw.Length == 0 ? "Enter the game's Steam AppId" : "AppId must be a positive number";
+            if (scan is not null) SetNormalStatus("Enter the game's real Steam AppId.");
+            return;
+        }
+
+        try
+        {
+            await Task.Delay(500, cancellationToken);
+            SteamSearchStatus.Text = $"Looking up AppId {appId}...";
+            StatusText.Text = $"Looking up Steam AppId {appId}...";
+            SteamSearchResult? match = await steamStore.LookupAppAsync(appId, cancellationToken);
+            if (match is null)
+            {
+                SteamSearchStatus.Text = $"Steam did not recognize AppId {appId}";
+                SetNormalStatus($"Steam did not recognize AppId {appId}.");
+                return;
+            }
+
+            loadingSteamMatches = true;
+            SteamMatchBox.ItemsSource = new[] { match };
+            SteamMatchBox.SelectedItem = match;
+            SelectedTitle.Text = match.Name;
+            SteamSearchStatus.Text = $"Found {match.Name} ({match.AppId})";
+            Log($"Manual AppId lookup found {match.Name} ({match.AppId}).");
+            if (scan is not null) RefreshPlan(selectChangesTab: false);
+            RefreshNormalStatus();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            SteamSearchStatus.Text = $"Could not look up AppId {appId}";
+            SetNormalStatus($"Could not look up AppId {appId}.");
+            Log($"Manual AppId lookup failed: {ex.Message}");
+        }
+        finally
+        {
+            loadingSteamMatches = false;
+        }
+    }
+
+    private void SetOriginalAppId(uint appId)
+    {
+        loadingSteamMatches = true;
+        OriginalAppIdBox.Text = appId.ToString();
+        loadingSteamMatches = false;
     }
 
     private void RunElevated_Click(object sender, RoutedEventArgs e) => RestartElevated();
@@ -455,12 +736,44 @@ public partial class MainWindow : Window
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223) { }
     }
 
-    private void SetBusy(bool busy, string? status = null)
+    private void SetBusy(bool isBusy, string? status = null)
     {
-        Progress.IsIndeterminate = busy;
-        if (!busy) Progress.Value = 0;
-        ApplyButton.IsEnabled = !busy && scan is not null;
+        Progress.IsIndeterminate = isBusy;
+        if (!isBusy) Progress.Value = 0;
+        ApplyButton.IsEnabled = !isBusy && scan is not null;
         if (status is not null) StatusText.Text = status;
+
+        if (!isBusy && busy)
+            StatusText.Text = normalStatus;
+        busy = isBusy;
+    }
+
+    private void SetNormalStatus(string status)
+    {
+        normalStatus = status;
+        if (!busy) StatusText.Text = status;
+    }
+
+    private void RefreshNormalStatus()
+    {
+        if (scan is null)
+        {
+            SetNormalStatus("Choose a game folder to begin");
+            return;
+        }
+        if (!uint.TryParse(OriginalAppIdBox.Text.Trim(), out uint appId) || appId == 0)
+        {
+            SetNormalStatus("Enter the game's real Steam AppId.");
+            return;
+        }
+        IReadOnlyList<MissingBackendSettings> missing = GetMissingBackendSettings();
+        if (missing.Count > 0)
+        {
+            string names = string.Join(", ", missing.Select(item => item.Backend));
+            SetNormalStatus($"{names} selected - fill the required fields or turn those plugins off.");
+            return;
+        }
+        SetNormalStatus("Ready to review and apply");
     }
 
     private void Log(string message)

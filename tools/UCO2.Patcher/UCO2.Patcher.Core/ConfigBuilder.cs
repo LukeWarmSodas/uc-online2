@@ -50,11 +50,19 @@ public static partial class ConfigBuilder
         {
             output.AppendLine();
             output.AppendLine("[EOS]");
-            output.AppendLine($"ProductId={SingleLine(options.EosProductId)}");
-            output.AppendLine($"SandboxId={SingleLine(options.EosSandboxId)}");
-            output.AppendLine($"DeploymentId={SingleLine(options.EosDeploymentId)}");
-            output.AppendLine($"ClientId={SingleLine(options.EosClientId)}");
-            output.AppendLine($"ClientSecret={SingleLine(options.EosClientSecret)}");
+            if (options.EosKeepGameApp)
+            {
+                // Device ID login on the game's OWN Epic app -- no app credentials needed.
+                output.AppendLine("KeepGameApp=1");
+            }
+            else
+            {
+                output.AppendLine($"ProductId={SingleLine(options.EosProductId)}");
+                output.AppendLine($"SandboxId={SingleLine(options.EosSandboxId)}");
+                output.AppendLine($"DeploymentId={SingleLine(options.EosDeploymentId)}");
+                output.AppendLine($"ClientId={SingleLine(options.EosClientId)}");
+                output.AppendLine($"ClientSecret={SingleLine(options.EosClientSecret)}");
+            }
             output.AppendLine($"DisplayName={SingleLine(options.DisplayName)}");
         }
 
@@ -71,7 +79,10 @@ public static partial class ConfigBuilder
         {
             output.AppendLine();
             output.AppendLine("[PlayFab]");
-            output.AppendLine($"TitleId={SingleLine(options.PlayFabTitleId)}");
+            if (options.PlayFabKeepGameTitle)
+                output.AppendLine("KeepGameTitle=1");
+            if (!string.IsNullOrWhiteSpace(options.PlayFabTitleId))
+                output.AppendLine($"TitleId={SingleLine(options.PlayFabTitleId)}");
         }
 
         return output.ToString().Replace("\r\n", "\n").Replace("\n", Environment.NewLine);

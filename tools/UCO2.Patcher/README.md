@@ -11,6 +11,7 @@ asks which interface to use; `/gui` and `/legacy` select one directly.
 - Detects Unity, Unreal, generic engines, architecture, SteamStub and backends.
 - Lets the user choose overlay deployment, plugins and individual INI flags.
 - Shows the complete settings, warnings and file list before applying a patch.
+- Remembers successfully applied Photon, EOS and PlayFab fields in a Windows user-encrypted profile and offers them for later compatible games.
 - Backs up every existing target to Local AppData with a JSON/hash manifest.
 - Rolls back a failed transaction and restores any selected snapshot.
 - Detects stale installed fix files after a patcher update.

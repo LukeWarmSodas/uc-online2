@@ -111,7 +111,12 @@
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="118" /></Grid.ColumnDefinitions>
                                 <TextBlock Text="STEAM MATCH" Foreground="{StaticResource FaintBrush}" FontSize="11" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,10,0" />
                                 <ComboBox x:Name="SteamMatchBox" Grid.Column="1" Height="30" VerticalContentAlignment="Center" SelectionChanged="SteamMatchBox_SelectionChanged" />
-                                <TextBox x:Name="OriginalAppIdBox" Grid.Column="2" Margin="8,0,0,0" Height="30" VerticalContentAlignment="Center" ToolTip="Game Steam AppId" />
+                                <Grid Grid.Column="2" Margin="8,0,0,0">
+                                    <TextBox x:Name="OriginalAppIdBox" Height="30" VerticalContentAlignment="Center" ToolTip="Game Steam AppId"
+                                             TextChanged="OriginalAppIdBox_TextChanged" />
+                                    <TextBlock x:Name="OriginalAppIdPlaceholder" Text="AppId" Foreground="{StaticResource FaintBrush}"
+                                               Margin="9,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False" />
+                                </Grid>
                             </Grid>
                             <Grid Margin="0,8,0,0">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
@@ -150,9 +155,9 @@
                                 <Border Grid.Column="2" Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="13,12">
                                     <StackPanel>
                                         <TextBlock Text="PLUGINS" Foreground="{StaticResource MutedBrush}" FontSize="11" FontWeight="Bold" Margin="0,0,0,10" />
-                                        <ToggleButton x:Name="EosCheck" Style="{StaticResource OptionToggle}" Content="EOS custom" Click="EosCheck_Toggled" />
-                                        <ToggleButton x:Name="PhotonCheck" Style="{StaticResource OptionToggle}" Content="Photon" />
-                                        <ToggleButton x:Name="PlayFabCheck" Style="{StaticResource OptionToggle}" Content="PlayFab" />
+                                        <ToggleButton x:Name="EosCheck" Style="{StaticResource OptionToggle}" Content="EOS custom" Click="BackendCheck_Toggled" />
+                                        <ToggleButton x:Name="PhotonCheck" Style="{StaticResource OptionToggle}" Content="Photon" Click="BackendCheck_Toggled" />
+                                        <ToggleButton x:Name="PlayFabCheck" Style="{StaticResource OptionToggle}" Content="PlayFab" Click="BackendCheck_Toggled" />
                                         <ToggleButton x:Name="CoherenceCheck" Style="{StaticResource OptionToggle}" Content="coherence" Margin="0" />
                                     </StackPanel>
                                 </Border>
@@ -170,13 +175,16 @@
                                                     <TextBlock Text="REQUIRED" Foreground="{StaticResource WarnBrush}" FontSize="10" FontWeight="Bold" />
                                                 </Border>
                                             </Grid>
+                                            <ToggleButton x:Name="EosKeepGameAppCheck" Style="{StaticResource OptionToggle}" Margin="0,0,0,10"
+                                                          Content="Use the game's own Epic app &#x2014; Device ID login, no redirect (no credentials needed)"
+                                                          Click="BackendCheck_Toggled" />
                                             <Grid>
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="160" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                                 <Grid.RowDefinitions><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /></Grid.RowDefinitions>
-                                                <TextBlock Text="ProductId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="EosProductBox" Grid.Column="1" Margin="0,3" TextChanged="EosField_Changed" />
-                                                <TextBlock Grid.Row="1" Text="SandboxId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="EosSandboxBox" Grid.Row="1" Grid.Column="1" Margin="0,3" TextChanged="EosField_Changed" />
-                                                <TextBlock Grid.Row="2" Text="DeploymentId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="EosDeploymentBox" Grid.Row="2" Grid.Column="1" Margin="0,3" TextChanged="EosField_Changed" />
-                                                <TextBlock Grid.Row="3" Text="ClientId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="EosClientBox" Grid.Row="3" Grid.Column="1" Margin="0,3" TextChanged="EosField_Changed" />
+                                                <TextBlock Text="ProductId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="EosProductBox" Grid.Column="1" Margin="0,3" TextChanged="BackendField_Changed" />
+                                                <TextBlock Grid.Row="1" Text="SandboxId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="EosSandboxBox" Grid.Row="1" Grid.Column="1" Margin="0,3" TextChanged="BackendField_Changed" />
+                                                <TextBlock Grid.Row="2" Text="DeploymentId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="EosDeploymentBox" Grid.Row="2" Grid.Column="1" Margin="0,3" TextChanged="BackendField_Changed" />
+                                                <TextBlock Grid.Row="3" Text="ClientId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="EosClientBox" Grid.Row="3" Grid.Column="1" Margin="0,3" TextChanged="BackendField_Changed" />
                                                 <TextBlock Grid.Row="4" Text="ClientSecret" VerticalAlignment="Center" Margin="0,4" /><PasswordBox x:Name="EosSecretBox" Grid.Row="4" Grid.Column="1" Margin="0,3" PasswordChanged="EosSecret_Changed" />
                                                 <TextBlock Grid.Row="5" Text="Display name" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="DisplayNameBox" Grid.Row="5" Grid.Column="1" Margin="0,3" Text="Player" />
                                             </Grid>
@@ -184,26 +192,39 @@
                                     </Border>
 
                                     <!-- Photon -->
-                                    <Border Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="13,12" Margin="0,0,0,10">
+                                    <Border x:Name="PhotonCredsGroup" Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="13,12" Margin="0,0,0,10">
                                         <StackPanel>
-                                            <TextBlock Text="PHOTON" Foreground="{StaticResource MutedBrush}" FontSize="11" FontWeight="Bold" Margin="0,0,0,8" />
+                                            <Grid Margin="0,0,0,8">
+                                                <TextBlock Text="PHOTON" Foreground="{StaticResource MutedBrush}" FontSize="11" FontWeight="Bold" />
+                                                <Border x:Name="PhotonRequiredBadge" HorizontalAlignment="Right" Background="{StaticResource WarnBgBrush}" BorderBrush="{StaticResource WarnBrush}" BorderThickness="1" Padding="7,1" Visibility="Collapsed">
+                                                    <TextBlock Text="REQUIRED" Foreground="{StaticResource WarnBrush}" FontSize="10" FontWeight="Bold" />
+                                                </Border>
+                                            </Grid>
                                             <Grid>
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="160" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                                 <Grid.RowDefinitions><RowDefinition /><RowDefinition /><RowDefinition /></Grid.RowDefinitions>
-                                                <TextBlock Text="Realtime AppId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="PhotonRealtimeBox" Grid.Column="1" Margin="0,3" />
-                                                <TextBlock Grid.Row="1" Text="Fusion AppId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="PhotonFusionBox" Grid.Row="1" Grid.Column="1" Margin="0,3" />
-                                                <TextBlock Grid.Row="2" Text="Voice AppId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="PhotonVoiceBox" Grid.Row="2" Grid.Column="1" Margin="0,3" />
+                                                <TextBlock Text="Realtime AppId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="PhotonRealtimeBox" Grid.Column="1" Margin="0,3" TextChanged="BackendField_Changed" />
+                                                <TextBlock Grid.Row="1" Text="Fusion AppId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="PhotonFusionBox" Grid.Row="1" Grid.Column="1" Margin="0,3" TextChanged="BackendField_Changed" />
+                                                <TextBlock Grid.Row="2" Text="Voice AppId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="PhotonVoiceBox" Grid.Row="2" Grid.Column="1" Margin="0,3" TextChanged="BackendField_Changed" />
                                             </Grid>
                                         </StackPanel>
                                     </Border>
 
                                     <!-- PlayFab -->
-                                    <Border Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="13,12" Margin="0,0,0,10">
+                                    <Border x:Name="PlayFabCredsGroup" Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="13,12" Margin="0,0,0,10">
                                         <StackPanel>
-                                            <TextBlock Text="PLAYFAB" Foreground="{StaticResource MutedBrush}" FontSize="11" FontWeight="Bold" Margin="0,0,0,8" />
+                                            <Grid Margin="0,0,0,8">
+                                                <TextBlock Text="PLAYFAB" Foreground="{StaticResource MutedBrush}" FontSize="11" FontWeight="Bold" />
+                                                <Border x:Name="PlayFabRequiredBadge" HorizontalAlignment="Right" Background="{StaticResource WarnBgBrush}" BorderBrush="{StaticResource WarnBrush}" BorderThickness="1" Padding="7,1" Visibility="Collapsed">
+                                                    <TextBlock Text="REQUIRED" Foreground="{StaticResource WarnBrush}" FontSize="10" FontWeight="Bold" />
+                                                </Border>
+                                            </Grid>
+                                            <ToggleButton x:Name="PlayFabKeepGameTitleCheck" Style="{StaticResource OptionToggle}" Margin="0,0,0,10"
+                                                          Content="Use the game's own PlayFab title &#x2014; anonymous login, no redirect (no TitleId needed)"
+                                                          Click="BackendCheck_Toggled" />
                                             <Grid>
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="160" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                                                <TextBlock Text="TitleId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="PlayFabTitleBox" Grid.Column="1" Margin="0,3" />
+                                                <TextBlock Text="TitleId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="PlayFabTitleBox" Grid.Column="1" Margin="0,3" TextChanged="BackendField_Changed" />
                                             </Grid>
                                         </StackPanel>
                                     </Border>
@@ -264,8 +285,10 @@
             </Grid>
         </Border>
 
-        <!-- ================= DETAILS STRIP ================= -->
-        <TabControl Grid.Row="3" x:Name="MainTabs" Height="210" Visibility="Collapsed" Background="{StaticResource WindowBrush}" BorderThickness="0" Padding="0" Margin="12,8,12,0">
+        <!-- ================= COLLAPSIBLE DETAILS DRAWER ================= -->
+        <Expander Grid.Row="3" x:Name="DetailsExpander" Header="Changes, backups &amp; activity" IsExpanded="True"
+                  Visibility="Collapsed" Margin="14,5,14,4">
+        <TabControl x:Name="MainTabs" Height="210" Background="{StaticResource WindowBrush}" BorderThickness="0" Padding="0" Margin="0,3,0,0">
             <TabItem Header="Changes">
                 <ListView x:Name="OperationList" Margin="0,8,0,0" Background="{StaticResource FieldBrush}" BorderBrush="{StaticResource BorderBrush}">
                     <ListView.View><GridView>
@@ -297,6 +320,7 @@
                          TextWrapping="Wrap" FontFamily="Cascadia Mono, Consolas" FontSize="12" Background="{StaticResource FieldBrush}" />
             </TabItem>
         </TabControl>
+        </Expander>
 
         <!-- ================= FOOTER ACTIONS ================= -->
         <Border Grid.Row="4" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0">

@@ -26,6 +26,15 @@ public sealed partial class SteamStoreSearchService : IDisposable
         return ParseResults(content);
     }
 
+    public async Task<SteamSearchResult?> LookupAppAsync(uint appId, CancellationToken cancellationToken = default)
+    {
+        string url = $"https://store.steampowered.com/api/appdetails?appids={appId}&l=english&cc=US";
+        using HttpResponseMessage response = await client.GetAsync(url, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        await using Stream content = await response.Content.ReadAsStreamAsync(cancellationToken);
+        return ParseAppDetails(content, appId);
+    }
+
     public static string BuildSearchTerm(string gameDirectory)
     {
         string folder = Path.GetFileName(Path.TrimEndingDirectorySeparator(gameDirectory));
@@ -51,6 +60,19 @@ public sealed partial class SteamStoreSearchService : IDisposable
             results.Add(new SteamSearchResult(appId, name, image));
         }
         return results;
+    }
+
+    public static SteamSearchResult? ParseAppDetails(Stream json, uint appId)
+    {
+        using JsonDocument document = JsonDocument.Parse(json);
+        if (!document.RootElement.TryGetProperty(appId.ToString(), out JsonElement app)) return null;
+        if (!app.TryGetProperty("success", out JsonElement success) || success.ValueKind != JsonValueKind.True) return null;
+        if (!app.TryGetProperty("data", out JsonElement data)) return null;
+        if (!data.TryGetProperty("name", out JsonElement nameElement)) return null;
+        string? name = nameElement.GetString();
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        string? image = data.TryGetProperty("header_image", out JsonElement imageElement) ? imageElement.GetString() : null;
+        return new SteamSearchResult(appId, name, image);
     }
 
     public static SteamSearchResult? FindBestMatch(string gameDirectory, IReadOnlyList<SteamSearchResult> results)
