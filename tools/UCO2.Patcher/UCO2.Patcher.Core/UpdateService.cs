@@ -58,18 +58,24 @@ public sealed class UpdateService : IDisposable
         using HttpResponseMessage response = await client.GetAsync(asset.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
         long total = response.Content.Headers.ContentLength ?? asset.Size;
-        await using Stream input = await response.Content.ReadAsStreamAsync(cancellationToken);
-        await using FileStream output = File.Create(destination);
-        byte[] buffer = new byte[128 * 1024];
-        long copied = 0;
-        int read;
-        while ((read = await input.ReadAsync(buffer, cancellationToken)) > 0)
+        // Scope the streams so the file handle is RELEASED before we hash it below.
+        // File.Create opens with FileShare.None, so a still-open output stream would
+        // make the SHA-256 read fail with "used by another process" -- the patcher
+        // colliding with its own download handle.
+        await using (Stream input = await response.Content.ReadAsStreamAsync(cancellationToken))
+        await using (FileStream output = File.Create(destination))
         {
-            await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-            copied += read;
-            if (total > 0) progress?.Report(copied / (double)total);
+            byte[] buffer = new byte[128 * 1024];
+            long copied = 0;
+            int read;
+            while ((read = await input.ReadAsync(buffer, cancellationToken)) > 0)
+            {
+                await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                copied += read;
+                if (total > 0) progress?.Report(copied / (double)total);
+            }
+            await output.FlushAsync(cancellationToken);
         }
-        await output.FlushAsync(cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(asset.Digest) && asset.Digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase))
         {
@@ -135,7 +141,10 @@ public static class SelfUpdateService
 
         string staging = Path.Combine(Path.GetTempPath(), "UCOnline2", "staging", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(staging);
-        ZipFile.ExtractToDirectory(archivePath, staging);
+        // The archive was just downloaded and the parent just exited; Windows
+        // Defender (or the OS releasing the parent's file handles) can still hold
+        // the zip for a moment. Retry instead of failing on the first collision.
+        await RetryOnLockAsync(() => ZipFile.ExtractToDirectory(archivePath, staging, overwriteFiles: true));
         string? packagedExecutable = SafeFileSystem.EnumerateFiles(staging, executableName).FirstOrDefault();
         if (packagedExecutable is null)
             throw new InvalidDataException($"The update archive does not contain {executableName}.");
@@ -146,7 +155,9 @@ public static class SelfUpdateService
             string relative = Path.GetRelativePath(packageRoot, source);
             string target = Path.Combine(installDirectory, relative);
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            File.Copy(source, target, overwrite: true);
+            // The target may be a DLL the just-exited parent still had mapped;
+            // its handle can linger a beat past WaitForExitAsync.
+            await RetryOnLockAsync(() => File.Copy(source, target, overwrite: true));
         }
 
         var start = new ProcessStartInfo
@@ -158,6 +169,26 @@ public static class SelfUpdateService
         if (!string.IsNullOrWhiteSpace(restartGameDirectory))
             start.Arguments = $"--game {Quote(restartGameDirectory)} --refresh-fix";
         Process.Start(start);
+    }
+
+    // Retry a file operation that can transiently fail with "used by another
+    // process" right after a download / parent exit (Defender scan, handle lag).
+    private static async Task RetryOnLockAsync(Action action, int timeoutMs = 20000)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                action();
+                return;
+            }
+            catch (Exception ex) when ((ex is IOException || ex is UnauthorizedAccessException)
+                                       && stopwatch.ElapsedMilliseconds < timeoutMs)
+            {
+                await Task.Delay(400);
+            }
+        }
     }
 
     private static string Quote(string value) => $"\"{value.Replace("\"", "\\\"")}\"";
