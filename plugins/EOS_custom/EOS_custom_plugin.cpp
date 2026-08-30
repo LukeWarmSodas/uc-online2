@@ -179,6 +179,9 @@ struct EosConfig
     char ClientId[128];
     char ClientSecret[256];
     char DisplayName[64];   // required by Device ID login
+    bool bKeepGameApp;      // [EOS] KeepGameApp: Device ID login on the game's OWN
+                            // Epic app, no redirect. WINS even if the app ids below
+                            // are filled in.
     bool bValid;
 };
 static EosConfig g_Cfg = {};
@@ -198,6 +201,11 @@ static void LoadEosConfig()
     GetPrivateProfileStringA("EOS", "ClientId",     "", g_Cfg.ClientId,     sizeof(g_Cfg.ClientId),     ini);
     GetPrivateProfileStringA("EOS", "ClientSecret", "", g_Cfg.ClientSecret, sizeof(g_Cfg.ClientSecret), ini);
     GetPrivateProfileStringA("EOS", "DisplayName",  "Player", g_Cfg.DisplayName, sizeof(g_Cfg.DisplayName), ini);
+
+    // [EOS] KeepGameApp=1 -> Device ID login on the game's OWN Epic app, no
+    // redirect. Deliberately checked BEFORE (and independent of) the app ids, so
+    // it wins even when they are filled in.
+    g_Cfg.bKeepGameApp = GetPrivateProfileIntA("EOS", "KeepGameApp", 0, ini) != 0;
 
     g_Cfg.bValid = g_Cfg.ProductId[0] && g_Cfg.SandboxId[0] && g_Cfg.DeploymentId[0] &&
                    g_Cfg.ClientId[0] && g_Cfg.ClientSecret[0];
@@ -251,6 +259,11 @@ static volatile LONG g_bShutdown  = 0;
 // platform still points at the PUBLISHER'S deployment would just create an
 // anonymous account on their backend, which is both useless and rude.
 static volatile LONG g_bPlatformRedirected = 0;
+
+// Whether Connect_Login should swap in a Device ID login. Set when we redirect
+// to our own app (the classic path) OR when [EOS] KeepGameApp deliberately keeps
+// the game's own app and only anonymises the login. Connect_Login gates on THIS.
+static volatile LONG g_bDoDeviceIdLogin = 0;
 
 typedef EOS_HPlatform (EOS_CALL_PLACEHOLDER)(void);
 typedef EOS_HPlatform (__cdecl* Fn_EOS_Platform_Create)(const void* Options);
@@ -365,6 +378,18 @@ static EOS_HPlatform __cdecl Hooked_Platform_Create(const void* Options)
         }
     }
 
+    // KeepGameApp: skip the redirect entirely -- keep the game's OWN Epic app and
+    // only anonymise the login (Device ID). Checked BEFORE the app ids so it wins
+    // even when they are filled in.
+    if (g_Cfg.bKeepGameApp) {
+        InterlockedExchange(&g_bDoDeviceIdLogin, 1);
+        static LONG s_keepLogged = 0;
+        if (InterlockedCompareExchange(&s_keepLogged, 1, 0) == 0)
+            LOG("[EOSAuth] KeepGameApp: NOT redirecting -- Device ID login on the game's own "
+                "EOS app (DisplayName=%s).", g_Cfg.DisplayName);
+        return g_orig_Platform_Create ? g_orig_Platform_Create(Options) : nullptr;
+    }
+
     if (Options) {
         uint8_t* p = (uint8_t*)Options;   // writable: we redirect the ids in place
 
@@ -413,6 +438,7 @@ static EOS_HPlatform __cdecl Hooked_Platform_Create(const void* Options)
                 cc->ClientSecret = g_Cfg.ClientSecret;
             }
             InterlockedExchange(&g_bPlatformRedirected, 1);
+            InterlockedExchange(&g_bDoDeviceIdLogin, 1);
             LOG("[EOSAuth]   -> REDIRECTED to Product=%s Sandbox=%s Deployment=%s Client=%s",
                 g_Cfg.ProductId, g_Cfg.SandboxId, g_Cfg.DeploymentId, g_Cfg.ClientId);
         } else {
@@ -540,11 +566,12 @@ static void __cdecl Hooked_Connect_Login(EOS_HConnect Handle, const void* Option
     if (Options) {
         EOS_Connect_LoginOptions* o = (EOS_Connect_LoginOptions*)Options;   // writable
 
-        // Only act if we actually redirected the platform to our Epic app --
-        // see g_bPlatformRedirected. Also validate before dereferencing, in
+        // Act when Device ID mode is armed (g_bDoDeviceIdLogin) -- set either by
+        // the redirect to our own app, or by [EOS] KeepGameApp keeping the game's
+        // app and only anonymising the login. Validate before dereferencing, in
         // case this isn't the layout we expect (EOS emulator / newer SDK).
-        if (!InterlockedCompareExchange(&g_bPlatformRedirected, 0, 0)) {
-            LOG("[EOSAuth] EOS_Connect_Login: platform was not redirected -- passing through untouched.");
+        if (!InterlockedCompareExchange(&g_bDoDeviceIdLogin, 0, 0)) {
+            LOG("[EOSAuth] EOS_Connect_Login: Device ID mode not armed -- passing through untouched.");
             if (g_orig_Connect_Login) g_orig_Connect_Login(Handle, Options, ClientData, CompletionDelegate);
             return;
         }
@@ -574,7 +601,7 @@ static void __cdecl Hooked_Connect_Login(EOS_HConnect Handle, const void* Option
         // provider, nothing for Epic to validate against Steam. It yields a
         // real ProductUserId on our own deployment, which is all the game
         // needs to create and advertise a session.
-        if (g_Cfg.bValid && t != EOS_ECT_DEVICEID_ACCESS_TOKEN) {
+        if (t != EOS_ECT_DEVICEID_ACCESS_TOKEN) {   // Device ID mode already armed above
             // Remember the struct versions the game used so our re-issued call
             // stays ABI-compatible with whatever SDK this is.
             g_LoginOptsApiVersion = o->ApiVersion;

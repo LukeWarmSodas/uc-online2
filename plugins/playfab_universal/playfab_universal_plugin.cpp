@@ -69,6 +69,11 @@ static wchar_t g_TitleIdW[64]    = {};   // wide, for the WinHTTP host rewrite
 static char    g_CustomIdA[128]  = {};   // literal CustomId; empty = use Steam ID
 static char    g_LoginEndpoints[256] = {};  // comma-separated, e.g. "LoginWithSteam"
 static bool    g_bNativeRedirect = true;    // module 3 on/off
+static bool    g_bKeepGameTitle  = false;   // [PlayFab] KeepGameTitle: anonymous login
+                                            // on the game's OWN title, no redirect.
+                                            // WINS even if TitleId is filled in.
+static char    g_GameTitleId[64] = {};      // game's own title, captured at runtime from
+                                            // the first login URL (KeepGameTitle mode)
 
 static char    g_GateAssembly[64]  = {};
 static char    g_GateNamespace[64] = {};
@@ -129,6 +134,37 @@ static const char* GetCustomId()
     return id;
 }
 
+// Should the plugin act on login calls at all? True when we have our own title
+// OR when KeepGameTitle asks us to anonymise the login on the game's own title.
+static bool PfActive()        { return g_TitleIdA[0] != 0 || g_bKeepGameTitle; }
+// Should we REDIRECT the title/host to ours? Only when we have a title AND are
+// not in KeepGameTitle mode (which deliberately keeps the game's title).
+static bool PfRedirectTitle() { return g_TitleIdA[0] != 0 && !g_bKeepGameTitle; }
+
+// The TitleId to write into the CustomId login body: ours when redirecting, else
+// the game's own (captured from the login URL under KeepGameTitle).
+static const char* BodyTitleId()
+{
+    if (g_bKeepGameTitle && g_GameTitleId[0]) return g_GameTitleId;
+    return g_TitleIdA;
+}
+
+// Capture "<title>" from https://<title>.playfabapi.com/... once, so KeepGameTitle
+// can echo the game's real title back in the login body.
+static void CaptureGameTitleFromUrl(const char* url)
+{
+    if (!g_bKeepGameTitle || g_GameTitleId[0] || !url) return;
+    const char* dom = strstr(url, ".playfabapi.com");
+    const char* schemeEnd = strstr(url, "://");
+    const char* hostStart = schemeEnd ? schemeEnd + 3 : url;
+    if (!dom || hostStart >= dom) return;
+    size_t n = (size_t)(dom - hostStart);
+    if (n == 0 || n >= sizeof(g_GameTitleId)) return;
+    memcpy(g_GameTitleId, hostStart, n);
+    g_GameTitleId[n] = 0;
+    LOG("[PlayFab] KeepGameTitle: keeping the game's own title %s (no redirect)", g_GameTitleId);
+}
+
 // ------------------------------------------------------------
 // MODULE 1: PlayFab TitleId redirect (managed set_TitleId)
 // ------------------------------------------------------------
@@ -137,7 +173,7 @@ static volatile LONG g_TitleIdRedirected = 0;
 
 static void TryRedirectTitleId()
 {
-    if (!g_TitleIdA[0]) return;
+    if (!PfRedirectTitle()) return;   // KeepGameTitle keeps the game's own title
     if (InterlockedCompareExchange(&g_TitleIdRedirected, 0, 0)) return;
     void* fn = MONO_FindMethodPtr("PlayFab", "PlayFab", "PlayFabSettings", "set_TitleId", 1);
     if (!fn) return;
@@ -182,7 +218,7 @@ static const char* MatchLoginEndpoint(const char* url)
 // Returns true if `out` was written.
 static bool RewriteHost(const char* url, char* out, size_t outSize)
 {
-    if (!g_TitleIdA[0]) return false;
+    if (!PfRedirectTitle()) return false;   // never rewrite the host under KeepGameTitle
     const char* dom = strstr(url, ".playfabapi.com");
     if (!dom) return false;
 
@@ -202,11 +238,12 @@ static bool RewriteHost(const char* url, char* out, size_t outSize)
 
 static void __fastcall Hooked_MakeApiCall(void* pThis, void* reqContainer)
 {
-    if (reqContainer && g_offFullUrl >= 0 && g_TitleIdA[0]) {
+    if (reqContainer && g_offFullUrl >= 0 && PfActive()) {
         MonoString* urlObj = *(MonoString**)((uint8_t*)reqContainer + g_offFullUrl);
         char url[512] = {};
         if (urlObj && MONO_StringToUtf8(urlObj, url, sizeof(url))) {
 
+            CaptureGameTitleFromUrl(url);
             const char* hit = MatchLoginEndpoint(url);
             if (hit) {
                 // -- platform login -> LoginWithCustomID --
@@ -237,7 +274,7 @@ static void __fastcall Hooked_MakeApiCall(void* pThis, void* reqContainer)
                 char body[320] = {};
                 int blen = _snprintf_s(body, sizeof(body), _TRUNCATE,
                     "{\"TitleId\":\"%s\",\"CustomId\":\"%s\",\"CreateAccount\":true}",
-                    g_TitleIdA, cid);
+                    BodyTitleId(), cid);
                 if (blen > 0 && g_offPayload >= 0) {
                     MonoObject* arr = MONO_NewByteArray(body, blen);
                     if (arr) *(void**)((uint8_t*)reqContainer + g_offPayload) = arr;
@@ -272,7 +309,7 @@ static volatile LONG     g_WinHttpRedirLogged = 0;
 static HINTERNET WINAPI Hooked_WinHttpConnect(HINTERNET hSession, LPCWSTR pswzServerName,
                                               INTERNET_PORT nServerPort, DWORD dwReserved)
 {
-    if (pswzServerName && g_TitleIdW[0] && wcsstr(pswzServerName, L".playfabapi.com")) {
+    if (pswzServerName && g_TitleIdW[0] && !g_bKeepGameTitle && wcsstr(pswzServerName, L".playfabapi.com")) {
         wchar_t newName[128] = {};
         _snwprintf_s(newName, _countof(newName), _TRUNCATE, L"%s.playfabapi.com", g_TitleIdW);
         if (_wcsicmp(pswzServerName, newName) != 0) {
@@ -391,7 +428,7 @@ static void MakeCustomIdBody(char* out, size_t outSize)
 {
     _snprintf_s(out, outSize, _TRUNCATE,
                 "{\"TitleId\":\"%s\",\"CustomId\":\"%s\",\"CreateAccount\":true}",
-                g_TitleIdA, GetCustomId());
+                BodyTitleId(), GetCustomId());
 }
 
 static void EnsureLoginBody()
@@ -431,7 +468,8 @@ static bool TakeLoginCall(void* call)
 
 static int32_t Hooked_HcSetUrl(void* call, const char* method, const char* url)
 {
-    if (url && g_TitleIdA[0] && MatchLoginEndpoint(url)) {
+    if (url) CaptureGameTitleFromUrl(url);
+    if (url && PfActive() && MatchLoginEndpoint(url)) {
         char newUrl[600];
         if (RewriteLoginUrl(url, newUrl, sizeof(newUrl))) {
             EnterCriticalSection(&g_HcLock);
@@ -448,7 +486,7 @@ static int32_t Hooked_HcSetUrl(void* call, const char* method, const char* url)
 
 static int32_t Hooked_HcSetBodyBytes(void* call, const uint8_t* body, uint32_t size)
 {
-    if (g_TitleIdA[0] && (TakeLoginCall(call) || BodyIsSteamLogin(body, size))) {
+    if (PfActive() && (TakeLoginCall(call) || BodyIsSteamLogin(body, size))) {
         (void)TakeLoginCall(call);   // clear the tag if content matched
         EnsureLoginBody();
         LogBodySwapOnce("bytes");
@@ -459,7 +497,7 @@ static int32_t Hooked_HcSetBodyBytes(void* call, const uint8_t* body, uint32_t s
 
 static int32_t Hooked_HcSetBodyString(void* call, const char* body)
 {
-    if (g_TitleIdA[0] && (TakeLoginCall(call) || (body && strstr(body, "SteamTicket")))) {
+    if (PfActive() && (TakeLoginCall(call) || (body && strstr(body, "SteamTicket")))) {
         (void)TakeLoginCall(call);
         EnsureLoginBody();
         LogBodySwapOnce("string");
@@ -474,7 +512,7 @@ static int32_t Hooked_HcSetBodyString(void* call, const char* body)
 static int32_t Hooked_HcSetBodyRead(void* call, Fn_HcBodyRead readFn,
                                     size_t bodySize, void* ctx)
 {
-    if (g_TitleIdA[0] && TakeLoginCall(call)) {
+    if (PfActive() && TakeLoginCall(call)) {
         EnsureLoginBody();
         LogBodySwapOnce("readfn");
         return g_origHcSetBodyRead(call, &OurBodyRead, g_LoginBodyLen, nullptr);
@@ -486,7 +524,7 @@ static int32_t Hooked_HcSetBodyRead(void* call, Fn_HcBodyRead readFn,
 // simply absent).
 static void InstallHcLoginRewrite()
 {
-    if (!g_TitleIdW[0]) return;
+    if (!g_TitleIdW[0] && !g_bKeepGameTitle) return;   // login swap still wanted under KeepGameTitle
     if (InterlockedCompareExchange(&g_HcHookDone, 0, 0)) return;
     HMODULE h = GetModuleHandleW(L"libHttpClient.Win32.dll");
     if (!h) return;   // native PlayFab SDK not loaded (yet, or a Mono game)
@@ -517,7 +555,7 @@ static void InstallHcLoginRewrite()
 // installed the hook).
 static void InstallNativeRedirect()
 {
-    if (!g_bNativeRedirect || !g_TitleIdW[0]) return;
+    if (!g_bNativeRedirect || !g_TitleIdW[0] || g_bKeepGameTitle) return;   // no host redirect under KeepGameTitle
     if (InterlockedCompareExchange(&g_WinHttpHookDone, 0, 0)) return;
     HMODULE hWin = GetModuleHandleW(L"winhttp.dll");
     if (!hWin) return;   // not loaded yet -- watcher retries
@@ -537,7 +575,7 @@ static bool TryInstallAll()
     // rewrite. Both no-op on Mono games (no winhttp target / no libHttpClient).
     InstallNativeRedirect();
     InstallHcLoginRewrite();
-    const bool winhttpReady = (!g_bNativeRedirect || !g_TitleIdW[0] ||
+    const bool winhttpReady = (!g_bNativeRedirect || !g_TitleIdW[0] || g_bKeepGameTitle ||
                                InterlockedCompareExchange(&g_WinHttpHookDone, 0, 0) != 0);
     // Only wait on the libHttpClient hook if that DLL is actually present (native
     // PlayFab game). Mono games never load it, so do not block on it there.
@@ -577,7 +615,7 @@ static bool TryInstallAll()
 
     bool loginReady   = InterlockedCompareExchange(&g_LoginHookDone, 0, 0) != 0;
     // nativeReady already computed above (before the Mono gate).
-    bool titleReady   = (!g_TitleIdA[0] ||
+    bool titleReady   = (!g_TitleIdA[0] || g_bKeepGameTitle ||
                          InterlockedCompareExchange(&g_TitleIdRedirected, 0, 0) != 0);
     bool gateReady    = (!GateConfigured() || g_GateKlass != nullptr);
 
@@ -632,6 +670,9 @@ extern "C" __declspec(dllexport) int __cdecl UCO_PluginInit(const UCO_PluginCont
         GetPrivateProfileStringA("PlayFab", "CustomId",       "",               g_CustomIdA,     sizeof(g_CustomIdA),     ini);
         GetPrivateProfileStringA("PlayFab", "LoginEndpoints", "LoginWithSteam", g_LoginEndpoints, sizeof(g_LoginEndpoints), ini);
         g_bNativeRedirect = GetPrivateProfileIntA("PlayFab", "RedirectNativeHttp", 1, ini) != 0;
+        // Anonymous login on the game's OWN title (no redirect). Read AFTER TitleId
+        // and independent of it, so it wins even when TitleId is filled in.
+        g_bKeepGameTitle  = GetPrivateProfileIntA("PlayFab", "KeepGameTitle", 0, ini) != 0;
 
         GetPrivateProfileStringA("PlayFab", "GateAssembly",  "", g_GateAssembly,  sizeof(g_GateAssembly),  ini);
         GetPrivateProfileStringA("PlayFab", "GateNamespace", "", g_GateNamespace, sizeof(g_GateNamespace), ini);
@@ -639,14 +680,15 @@ extern "C" __declspec(dllexport) int __cdecl UCO_PluginInit(const UCO_PluginCont
         GetPrivateProfileStringA("PlayFab", "GateField",     "", g_GateField,     sizeof(g_GateField),     ini);
     }
 
-    LOG("[PlayFab] init: AppId=%u ogAppId=%u pSteamUser=%p TitleId=%s logins=%s nativeRedirect=%d gate=%s",
+    LOG("[PlayFab] init: AppId=%u ogAppId=%u pSteamUser=%p TitleId=%s KeepGameTitle=%d logins=%s nativeRedirect=%d gate=%s",
         ctx->ForcedAppId, ctx->OriginalAppId, (void*)g_pSteamUser,
-        g_TitleIdA[0] ? g_TitleIdA : "(none - plugin idle)",
+        g_TitleIdA[0] ? g_TitleIdA : (g_bKeepGameTitle ? "(game's own)" : "(none - plugin idle)"),
+        g_bKeepGameTitle ? 1 : 0,
         g_LoginEndpoints, g_bNativeRedirect ? 1 : 0,
         GateConfigured() ? g_GateClass : "(none)");
 
-    if (!g_TitleIdA[0]) {
-        LOG("[PlayFab] no [PlayFab]TitleId in union-crax.ini -- nothing to do");
+    if (!PfActive()) {
+        LOG("[PlayFab] no [PlayFab]TitleId and KeepGameTitle off -- nothing to do");
         return 0;
     }
 
