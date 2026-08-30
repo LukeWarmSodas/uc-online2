@@ -90,8 +90,10 @@ jobs:
       - name: Package release zip
         shell: pwsh
         run: |
-          $packageRootrel = "dist/uc-online2-${{ github.ref_name }}-release"
-          $archivePathrel = "$packageRootrel.zip"
+          # Folder name is PLAIN (unversioned) so it stays stable across
+          # auto-updates; only the ZIP name carries the version.
+          $packageRootrel = "dist/uc-online2-release"
+          $archivePathrel = "dist/uc-online2-${{ github.ref_name }}-release.zip"
 
           New-Item -ItemType Directory -Path "$packageRootrel/x86" -Force | Out-Null
           New-Item -ItemType Directory -Path "$packageRootrel/x64" -Force | Out-Null
@@ -130,8 +132,9 @@ jobs:
       - name: Package debug zip
         shell: pwsh
         run: |
-          $packageRootdeb = "dist/uc-online2-${{ github.ref_name }}-debug"
-          $archivePathdeb = "$packageRootdeb.zip"
+          # Plain (unversioned) folder name; versioned ZIP name only.
+          $packageRootdeb = "dist/uc-online2-debug"
+          $archivePathdeb = "dist/uc-online2-${{ github.ref_name }}-debug.zip"
 
           New-Item -ItemType Directory -Path "$packageRootdeb/x86" -Force | Out-Null
           New-Item -ItemType Directory -Path "$packageRootdeb/x64" -Force | Out-Null
