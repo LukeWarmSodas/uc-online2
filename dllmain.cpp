@@ -1102,10 +1102,14 @@ void CCallbackDispatcher::Add(CCallbackBase* pCb, int iCallback)
 		return;
 	}
 
-	if (pCb->GetCallbackSizeBytes() == 0)
-		return;
-
-	UCOLOG("[UCOnline2] Register callback -> %d size=%d flags=%d\r\n", iCallback, pCb->GetCallbackSizeBytes(), pCb->m_nCallbackFlags);
+	// Do NOT call pCb->GetCallbackSizeBytes() here. Real Steam does not invoke a
+	// callback's virtuals at registration time -- it just links it in and reads
+	// the size later, at dispatch. Some wrappers route that virtual straight into
+	// managed code: Facepunch.Steamworks' FileDetailsResult_t faults inside its
+	// managed StructSize/OnGetSize when called re-entrantly from within the
+	// RegisterCallbacks loop, crashing the game (e.g. Risk of Rain 2). Just
+	// register the callback; the size is read safely when the callback fires.
+	UCOLOG("[UCOnline2] Register callback -> %d flags=%d\r\n", iCallback, pCb->m_nCallbackFlags);
 
 	pCb->m_nCallbackFlags |= pCb->k_ECallbackFlagsRegistered;
 	pCb->m_iCallback = iCallback;
