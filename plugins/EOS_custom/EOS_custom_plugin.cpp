@@ -364,6 +364,25 @@ static bool LooksLikeEosId(const char* s)
     return s[32] == '\0';
 }
 
+// Diagnostic: scan the options block for pointers to EOS ids, so we can see the
+// REAL layout when the fixed offsets do not match (a newer SDK, an EAC platform,
+// or a wrapper). Logs the first few calls only.
+static void DumpEosOptions(const uint8_t* p)
+{
+    static volatile LONG s_dumped = 0;
+    if (InterlockedIncrement(&s_dumped) > 4) return;
+    LOG("[EOSAuth] Platform_Create options scan (ApiVersion=%d):",
+        IsReadable(p, 4) ? *(const int32_t*)p : -1);
+    int found = 0;
+    for (int off = 8; off <= 128; off += 8) {
+        const char** pp = (const char**)(p + off);
+        if (!IsReadable(pp, sizeof(void*))) continue;
+        if (LooksLikeEosId(*pp)) { LOG("[EOSAuth]   +0x%02X -> EOS id %s", off, *pp); ++found; }
+    }
+    if (!found)
+        LOG("[EOSAuth]   no EOS ids found in the options -- likely a null/anti-cheat platform.");
+}
+
 // ------------------------------------------------------------
 // Hooked EOS_Platform_Create -- rewrite the product/sandbox/deployment/
 // client ids the game initializes with to point at OUR Epic app.
@@ -408,6 +427,7 @@ static EOS_HPlatform __cdecl Hooked_Platform_Create(const void* Options)
         }
 
         int32_t apiver = *(const int32_t*)(p + 0);
+        DumpEosOptions(p);   // diagnostic: where do the EOS ids actually live?
 
         const char** ppProductId    = (const char**)(p + 16);
         const char** ppSandboxId    = (const char**)(p + 24);
@@ -416,8 +436,11 @@ static EOS_HPlatform __cdecl Hooked_Platform_Create(const void* Options)
 
         // Prove the layout: all three ids must look like real EOS ids. If not,
         // we're almost certainly not looking at the genuine Epic SDK's struct.
+        // ProductId + DeploymentId at their expected offsets are proof enough of
+        // the genuine EOS layout. SandboxId is NOT required: some games (NMRiH2)
+        // pass it null, and demanding it made the whole redirect bail. We overwrite
+        // it with ours below regardless.
         const bool bLayoutOK = LooksLikeEosId(*ppProductId)
-                            && LooksLikeEosId(*ppSandboxId)
                             && LooksLikeEosId(*ppDeploymentId);
 
         if (!bLayoutOK) {
@@ -708,6 +731,31 @@ static void LogEosLookingModules()
     CloseHandle(snap);
 }
 
+// Diagnostic: list EVERY module exporting EOS_Platform_Create. Games with
+// EasyAntiCheat can load a SECOND EOS SDK (EAC's) alongside the game's, and if we
+// hook the wrong one our redirect never touches the game's platform.
+static void LogAllEosModules()
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE) return;
+    MODULEENTRY32 me = {};
+    me.dwSize = sizeof(me);
+    int n = 0;
+    if (Module32First(snap, &me)) {
+        do {
+            FARPROC pc = me.hModule ? GetProcAddress(me.hModule, "EOS_Platform_Create") : nullptr;
+            if (!pc) continue;
+            char name[MAX_PATH] = {};
+            WideCharToMultiByte(CP_UTF8, 0, me.szModule, -1, name, sizeof(name), nullptr, nullptr);
+            LOG("[EOSAuth]   EOS module #%d: %s (Platform_Create @ %p, base %p)",
+                ++n, name, (void*)pc, (void*)me.hModule);
+        } while (Module32Next(snap, &me));
+    }
+    if (n > 1)
+        LOG("[EOSAuth]   NOTE: %d EOS SDKs loaded -- only the first is currently hooked.", n);
+    CloseHandle(snap);
+}
+
 // ------------------------------------------------------------
 // LoadLibrary trap.
 //
@@ -786,6 +834,8 @@ static bool InstallHooksLocked()
     char eosName[MAX_PATH] = {};
     HMODULE hEos = FindEosModule(eosName, sizeof(eosName));
     if (!hEos) return false; // not loaded yet
+
+    LogAllEosModules();   // diagnostic: how many EOS SDKs are loaded, which is ours?
 
     void* pPlatformCreate = (void*)GetProcAddress(hEos, "EOS_Platform_Create");
     void* pConnectLogin   = (void*)GetProcAddress(hEos, "EOS_Connect_Login");
