@@ -1416,7 +1416,13 @@ static DWORD WINAPI SteamStub_HookGetTickCount(void)
 	uint8_t* found = SteamStub_FindSignature(start, end, STEAM_STUB_SIGNATURE, sizeof(STEAM_STUB_SIGNATURE));
 	if (found)
 	{
-		found[7] = 0x85;
+		// Turn the stub's conditional check-jump into an unconditional one:
+		// 0F 84 (je rel32) -> 90 E9 (nop; jmp rel32). The 4-byte rel32 is left
+		// intact and the instruction end is unchanged, so the jmp lands on the
+		// exact target the je would have -- the pass branch is now always taken.
+		// Synced to DenuvoSanctuary's current steam-stubbed (was je->jne here).
+		found[6] = 0x90; // nop (was 0x0F)
+		found[7] = 0xE9; // jmp (was 0x84)
 
 		uint32_t count = g_SteamStubCount.fetch_add(1, std::memory_order_seq_cst) + 1;
 		if (count >= STEAM_STUB_MAX_COUNT)
