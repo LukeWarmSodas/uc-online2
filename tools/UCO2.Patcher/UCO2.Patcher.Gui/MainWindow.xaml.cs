@@ -204,6 +204,7 @@ public partial class MainWindow : Window
         PassthroughTicketCheck.IsChecked = ini.GetBool("Settings", "PassthroughTicket");
         EmulateTicketCheck.IsChecked = ini.GetBool("Settings", "EmulateTicket");
         SdrCheck.IsChecked = ini.GetBool("Settings", "SDR");
+        InventoryGrantCheck.IsChecked = ini.GetBool("Settings", "InventoryAutoGrant");
         LegacyClientBox.Text = ini.Get("Settings", "Client");
 
         PhotonCheck.IsChecked = game.Backends.HasFlag(BackendKind.PhotonRealtime) || game.Backends.HasFlag(BackendKind.PhotonFusion)
@@ -233,7 +234,7 @@ public partial class MainWindow : Window
         [
             "AppId", "ogAppId", "PluginsFolder", "GetStubbedLol", "LoadOverlay", "LogOverlay",
             "WarnOverlayDisabled", "VerboseLog", "ForceOwnership", "PassthroughTicket", "EmulateTicket",
-            "SDR", "Client"
+            "SDR", "InventoryAutoGrant", "Client"
         ];
         AdditionalFlagsBox.Text = string.Join(Environment.NewLine, ini.GetSection("Settings")
             .Where(pair => !known.Contains(pair.Key, StringComparer.OrdinalIgnoreCase))
@@ -263,6 +264,7 @@ public partial class MainWindow : Window
             PassthroughTicket = PassthroughTicketCheck.IsChecked == true,
             EmulateTicket = EmulateTicketCheck.IsChecked == true,
             EnableSdr = SdrCheck.IsChecked == true,
+            InventoryAutoGrant = InventoryGrantCheck.IsChecked == true,
             InstallPhoton = PhotonCheck.IsChecked == true,
             InstallEos = EosCheck.IsChecked == true,
             InstallPlayFab = PlayFabCheck.IsChecked == true,
@@ -287,7 +289,7 @@ public partial class MainWindow : Window
         [
             "AppId", "ogAppId", "PluginsFolder", "GetStubbedLol", "LoadOverlay", "LogOverlay",
             "WarnOverlayDisabled", "VerboseLog", "ForceOwnership", "PassthroughTicket", "EmulateTicket",
-            "SDR", "Client"
+            "SDR", "InventoryAutoGrant", "Client"
         ];
         foreach (string raw in AdditionalFlagsBox.Text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {

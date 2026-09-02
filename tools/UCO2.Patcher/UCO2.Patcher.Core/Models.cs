@@ -104,6 +104,7 @@ public sealed class PatchOptions
     public bool PassthroughTicket { get; set; }
     public bool EmulateTicket { get; set; }
     public bool EnableSdr { get; set; }
+    public bool InventoryAutoGrant { get; set; }
     public bool InstallPhoton { get; set; }
     public bool InstallEos { get; set; }
     public bool InstallPlayFab { get; set; }

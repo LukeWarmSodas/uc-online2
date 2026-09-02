@@ -261,7 +261,8 @@
                                                 <StackPanel Width="230">
                                                     <ToggleButton x:Name="LogOverlayCheck" Style="{StaticResource OptionToggle}" Content="Overlay logging" />
                                                     <ToggleButton x:Name="WarnOverlayCheck" Style="{StaticResource OptionToggle}" Content="Overlay warning" />
-                                                    <ToggleButton x:Name="VerboseLogCheck" Style="{StaticResource OptionToggle}" Content="Verbose logging" Margin="0" />
+                                                    <ToggleButton x:Name="VerboseLogCheck" Style="{StaticResource OptionToggle}" Content="Verbose logging" />
+                                                    <ToggleButton x:Name="InventoryGrantCheck" Style="{StaticResource OptionToggle}" Content="Auto-grant purchases" ToolTip="InventoryAutoGrant — approve ISteamInventory StartPurchase locally and grant/persist the items" Margin="0" />
                                                 </StackPanel>
                                             </WrapPanel>
                                         </StackPanel>
