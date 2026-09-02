@@ -1379,111 +1379,11 @@ void CDumpHandler::WriteDump(DWORD exceptionCode, _EXCEPTION_POINTERS* pExceptio
  *  SteamStubbed, credits to DenuvoSanctuary for the original code for this.
  *  Originally written in Rust, rewritten here in C++ to integrate it.
  */
-#include <intrin.h>
-#include "include/MinHook.h"
-#include <atomic>
+#include "include/steamstub_hook.h"
 
-// Ownership-check signatures. Each pattern ends at the stub's JZ rel32 (0F 84);
-// patchAt is the offset of the 0F within the match. We overwrite 0F 84 with
-// 90 E9 (nop + jmp rel32), reusing the JZ's own 4-byte operand so the branch
-// becomes an unconditional jump to the exact target it already had -- the pass
-// branch is now always taken. Add an entry here if a future SteamStub build
-// moves the check: grab the bytes just after its GetTickCount call site.
-struct SteamStubSig
-{
-	const uint8_t* bytes;
-	size_t         len;
-	size_t         patchAt;
-};
-
-// Variant 3.1 (x64): movzx r15d, al ; cmp al, 30h ; jz <ownership-ok>
-static constexpr uint8_t kSteamStubV31[] = { 0x44, 0x0F, 0xB6, 0xF8, 0x3C, 0x30, 0x0F, 0x84 };
-static constexpr SteamStubSig kSteamStubSigs[] = {
-	{ kSteamStubV31, sizeof(kSteamStubV31), 6 },
-};
-
-typedef DWORD(WINAPI* GetTickCount_t)(void);
-static GetTickCount_t     g_OrigGetTickCount = nullptr;
-static std::atomic<bool>  g_SteamStubArmed{ false };
-
-// Scan [base, base+range) for the pattern under SEH: if the 128-byte window
-// runs past the end of a mapped page we swallow the fault instead of taking
-// down the host. No C++ objects with destructors in this frame, so __try is
-// legal here.
-static uint8_t* SteamStub_FindSigGuarded(uint8_t* base, size_t range, const SteamStubSig& sig)
-{
-	__try
-	{
-		if (range < sig.len)
-			return nullptr;
-		uint8_t* end = base + range - sig.len;
-		for (uint8_t* p = base; p <= end; ++p)
-		{
-			bool match = true;
-			for (size_t i = 0; i < sig.len; ++i)
-			{
-				if (p[i] != sig.bytes[i])
-				{
-					match = false;
-					break;
-				}
-			}
-			if (match)
-				return p;
-		}
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER)
-	{
-		return nullptr;
-	}
-	return nullptr;
-}
-
-// Flip only the two bytes we touch, then restore the original protection.
-static bool SteamStub_ApplyPatch(uint8_t* site, const SteamStubSig& sig)
-{
-	uint8_t* at = site + sig.patchAt;
-	DWORD oldProtect = 0;
-	if (!VirtualProtect(at, 2, PAGE_EXECUTE_READWRITE, &oldProtect))
-		return false;
-	at[0] = 0x90; // nop (was 0x0F)
-	at[1] = 0xE9; // jmp rel32, keeps the JZ's operand (was 0x84)
-	VirtualProtect(at, 2, oldProtect, &oldProtect);
-	FlushInstructionCache(GetCurrentProcess(), at, 2);
-	return true;
-}
-
-// We deliberately never MH_DisableHook from inside our own detour -- pulling a
-// hook while executing on its trampoline is unsafe. Once armed we leave the
-// hook in place as a plain pass-through; the atomic short-circuit makes that
-// free, and the CAS guarantees only the first thread to reach the check patches
-// even under a race.
-static DWORD WINAPI SteamStub_HookGetTickCount(void)
-{
-	DWORD tick = g_OrigGetTickCount ? g_OrigGetTickCount() : 0;
-
-	if (!g_SteamStubArmed.load(std::memory_order_acquire))
-	{
-		uint8_t* ret = reinterpret_cast<uint8_t*>(_ReturnAddress());
-		for (const auto& sig : kSteamStubSigs)
-		{
-			uint8_t* site = SteamStub_FindSigGuarded(ret, 128, sig);
-			if (!site)
-				continue;
-			bool expected = false;
-			if (g_SteamStubArmed.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
-			{
-				if (SteamStub_ApplyPatch(site, sig))
-					UCOLOG("[UCOnline2] SteamStub armed: jz->jmp patched");
-				else
-					UCOLOG("[UCOnline2] SteamStub VirtualProtect failed");
-			}
-			break;
-		}
-	}
-
-	return tick;
-}
+// The bypass mechanics live in the shared header (also used by the early-load
+// proxy, version.dll). Route its log lines through UCOLOG.
+static void SteamStub_LogCb(const char* m) { UCOLOG("[UCOnline2] %s", m); }
 
 // ============================================================
 // Generic Steam-side spoof hooks
@@ -2186,16 +2086,16 @@ void InstallSteamSpoofHooks()
 
 static void SteamStub_Init()
 {
-	if (MH_Initialize() != MH_OK)
+	// If the early-load proxy (version.dll) already armed the bypass before the
+	// exe entry point -- the only path that works for Unity games that P/Invoke
+	// steam_api64 lazily -- don't hook GetTickCount a second time.
+	char probe[8] = {};
+	if (GetEnvironmentVariableA("UCO2_STEAMSTUB_HOOKED", probe, sizeof(probe)) > 0)
+	{
+		UCOLOG("[UCOnline2] SteamStub already armed by the early proxy; skipping");
 		return;
+	}
 
-	void* pTarget = reinterpret_cast<void*>(GetTickCount);
-
-	if (MH_CreateHook(pTarget, SteamStub_HookGetTickCount, reinterpret_cast<LPVOID*>(&g_OrigGetTickCount)) != MH_OK)
-		return;
-
-	if (MH_EnableHook(pTarget) != MH_OK)
-		return;
-
-	UCOLOG("[UCOnline2] SteamStub hook initialized");
+	if (UcoSteamStub::Install(&SteamStub_LogCb))
+		UCOLOG("[UCOnline2] SteamStub hook initialized");
 }
