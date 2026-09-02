@@ -33,6 +33,17 @@ public static partial class ConfigBuilder
         foreach ((uint appId, string name) in FindDlcEntries(game))
             output.AppendLine($"{appId}={SingleLine(name)}");
 
+        // When any plugin is deployed, have the early-load proxy (version.dll)
+        // preload steam_api64 before the game runs, so the plugin's hooks are in
+        // place before the game inits its backend. Unity P/Invokes steam_api64
+        // lazily, which can otherwise land after EOS/PlayFab is already up.
+        if (options.InstallPhoton || options.InstallEos || options.InstallCoherence || options.InstallPlayFab)
+        {
+            output.AppendLine();
+            output.AppendLine("[VersionProxy]");
+            output.AppendLine("LoadDLLsEarly=true");
+        }
+
         if (options.InstallPhoton)
         {
             output.AppendLine();

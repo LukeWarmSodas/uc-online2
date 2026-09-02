@@ -587,6 +587,22 @@ set "INI=%INI_DIR%\union-crax.ini"
 >> "%INI%" echo GetStubbedLol=%GET_STUBBED%
 >> "%INI%" echo LogOverlay=no
 
+rem [VersionProxy] -- when we deploy any plugin, tell the early-load proxy
+rem (version.dll for Unity / XINPUT1_3.dll for Unreal) to preload steam_api64
+rem BEFORE the game runs, so the plugin's hooks install before the game inits
+rem its backend. Unity P/Invokes steam_api64 lazily on its first Steam call,
+rem which can otherwise land AFTER EOS/PlayFab is already up (too late to hook).
+set "HAS_PLUGIN="
+if defined FLAVOR set "HAS_PLUGIN=1"
+if defined HAS_EOS set "HAS_PLUGIN=1"
+if defined HAS_PLAYFAB set "HAS_PLUGIN=1"
+if defined HAS_COHERENCE set "HAS_PLUGIN=1"
+if defined HAS_PLUGIN (
+  >> "%INI%" echo(
+  >> "%INI%" echo [VersionProxy]
+  >> "%INI%" echo LoadDLLsEarly=true
+)
+
 rem ============================================================
 rem  [DLC]
 rem
