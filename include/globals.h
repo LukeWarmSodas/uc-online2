@@ -649,6 +649,12 @@ extern uintp g_CtxCounter;
 extern ISteamClient* g_pSteamClientLegacy;
 extern char g_LegacyClientVersion[64];
 
+// The ISteamUser interface version the GAME resolved through the flat API
+// (e.g. 21 for "SteamUser021"). 0 = not seen yet. Recorded in UCO_FlatIfaceGuard.
+// GetAuthSessionTicket gained a networking-identity argument at version 022, so
+// the flat wrapper must know the caller's arity to avoid reading a garbage arg.
+extern int g_GameSteamUserVersion;
+
 void UCOLOG(const char* fmt, ...);
 void UCOColor(WORD color, const char* text);
 

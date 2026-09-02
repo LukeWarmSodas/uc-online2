@@ -272,6 +272,16 @@ static void* UCO_FlatIfaceGuard(void* p, const char* name, const char* version)
 	// call before the log freezes names the interface that faults.
 	UCOLOG("[UCOnline2] FLAT %s version=%s -> %s\r\n",
 	       name, version ? version : "(none)", p ? "ok" : "NULL(stub)");
+	// Record the ISteamUser version the game asked for. GetAuthSessionTicket
+	// gained a 4th (networking-identity) argument at version 022; a game on 021
+	// or older calls the flat export with only three, so the wrapper must not
+	// read/forward the (garbage) identity for those callers.
+	if (version && name && strcmp(name, "GetISteamUser") == 0 &&
+	    strncmp(version, "SteamUser", 9) == 0)
+	{
+		int v = atoi(version + 9);
+		if (v > 0) g_GameSteamUserVersion = v;
+	}
 	if (p) return p;
 	static char s_FlatIfaceStub[4096] = {};
 	return (void*)s_FlatIfaceStub;
@@ -748,7 +758,15 @@ S_API HAuthTicket S_CALLTYPE SteamAPI_ISteamUser_GetAuthSessionTicket(intptr_t i
 {
 	if (g_bClientReady == false)
 		__debugbreak();
-	return g_ClientCtx.SteamUser()->GetAuthSessionTicket(pTicket, cbMaxTicket, pcbTicket, pSteamNetworkingIdentity);
+	// A game built against SteamUser021 or older calls the 3-argument form of
+	// this export -- it never pushes pSteamNetworkingIdentity, so what we read
+	// for it is a garbage stack slot. Forwarding that to real Steam faults
+	// (it dereferences the identity). Pass null for those callers; a null
+	// identity is the pre-022 behaviour anyway (ticket not bound to a peer).
+	const SteamNetworkingIdentity* ident =
+		(g_GameSteamUserVersion != 0 && g_GameSteamUserVersion < 22)
+			? nullptr : pSteamNetworkingIdentity;
+	return g_ClientCtx.SteamUser()->GetAuthSessionTicket(pTicket, cbMaxTicket, pcbTicket, ident);
 }
 S_API HAuthTicket S_CALLTYPE SteamAPI_ISteamUser_GetAuthTicketForWebApi(intptr_t instancePtr, const char* pchIdentity)
 {

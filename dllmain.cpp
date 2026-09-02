@@ -120,6 +120,7 @@ uintp g_CtxCounter = 1;
 // accessor returns for games built against an older Steamworks SDK.
 ISteamClient* g_pSteamClientLegacy = nullptr;
 char g_LegacyClientVersion[64] = { 0 };
+int g_GameSteamUserVersion = 0;
 
 // Forward declarations for SteamStub
 static bool g_bSteamStubEnabled = false;
