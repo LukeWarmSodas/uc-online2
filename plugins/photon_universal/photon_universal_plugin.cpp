@@ -437,13 +437,17 @@ static const char* PickAppIdUtf8(void* pThis, const char** outName)
     return g_AppIdPatchEnabled ? g_AppIdUtf8 : nullptr;
 }
 
+// Real offset of AuthenticationValues.authType, resolved from metadata in
+// TryInstall (-1 until known). Replaces the old hardcoded 0x10 guess, which
+// on Mono's field layout landed on a reference field and crashed the GC.
+static int g_MonoAuthTypeOffset = -1;
 static void PatchAuthType(void* authValues, const char* sender)
 {
-    if (!authValues) return;
-    unsigned char* p = (unsigned char*)authValues + kOffsetAuthType;
+    if (!authValues || g_MonoAuthTypeOffset < 0) return;   // never write at a guessed offset
+    unsigned char* p = (unsigned char*)authValues + g_MonoAuthTypeOffset;
     unsigned char prev = *p;
     *p = (unsigned char)(g_ForcedAuthType & 0xFF);
-    LOG("[Realtime/Mono] %s: authValues.authType %u -> %u", sender, prev, g_ForcedAuthType);
+    LOG("[Realtime/Mono] %s: authValues.authType(@0x%x) %u -> %u", sender, g_MonoAuthTypeOffset, prev, g_ForcedAuthType);
 }
 
 typedef void (__fastcall *Fn_SetAuthType)(void* pThis, unsigned int value);
@@ -504,6 +508,19 @@ static bool TryInstall()
 {
     if (!MONO_IsReady()) return false;
     if (!MONO_FindClass("Photon.Realtime", "Photon.Realtime", "LoadBalancingPeer")) return false;
+
+    // Resolve the REAL offset of AuthenticationValues.authType rather than
+    // guessing 0x10: Mono's auto field layout often puts the property backing
+    // fields (references) before the enum, so a raw write at 0x10 would smash a
+    // string pointer and crash the GC (mono_validate_string_pointer). If we
+    // can't resolve it we simply skip the object-field force -- params[217] on
+    // the wire and the set_AuthType hook already force Custom auth.
+    if (g_MonoAuthTypeOffset < 0)
+    {
+        MonoClass* avc = MONO_FindClass("Photon.Realtime", "Photon.Realtime", "AuthenticationValues");
+        if (avc) g_MonoAuthTypeOffset = MONO_GetFieldOffset(avc, "authType");
+        LOG("[Realtime/Mono] AuthenticationValues.authType field offset = 0x%x", g_MonoAuthTypeOffset);
+    }
 
     if (!g_PeerCsInit) { InitializeCriticalSection(&g_PeerCs); g_PeerCsInit = true; }
 
