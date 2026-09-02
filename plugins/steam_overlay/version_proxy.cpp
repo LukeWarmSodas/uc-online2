@@ -27,6 +27,7 @@
 #include <Xinput.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include "steamstub_hook.h"   // shared SteamStub bypass (armed early from DllMain)
 
 static HMODULE g_Module        = nullptr;
 static HMODULE g_SystemProxy   = nullptr;
@@ -394,12 +395,57 @@ extern "C" DWORD WINAPI Proxy_XInputCancelGuideButtonWait(DWORD user)
 extern "C" DWORD WINAPI Proxy_XInputPowerOffController(DWORD user)
 { using Fn = DWORD (WINAPI*)(DWORD); auto f=ResolveOrdinal<Fn>(103); return f ? f(user) : ERROR_DEVICE_NOT_CONNECTED; }
 
+static void SteamStub_LogCb(const char* m) { Log("[steam_overlay] %s", m); }
+
+// Is the Steam client running? ActiveProcess\pid holds the live Steam PID and
+// is cleared to 0 on a clean exit. Conservative: only a definitive pid==0 counts
+// as "not running" -- any ambiguity (registry missing/unreadable) returns true
+// so we never wrongly abort a game whose Steam is actually up.
+static bool SteamRunning()
+{
+    HKEY k;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Valve\\Steam\\ActiveProcess",
+                      0, KEY_READ, &k) != ERROR_SUCCESS)
+        return true;
+    DWORD pid = 0, sz = sizeof(pid), type = 0;
+    bool read = RegQueryValueExA(k, "pid", nullptr, &type, (BYTE*)&pid, &sz) == ERROR_SUCCESS;
+    RegCloseKey(k);
+    return !read || pid != 0;
+}
+
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)
     {
         g_Module = module;
         DisableThreadLibraryCalls(module);
+
+        // UCOnline2 proxies the REAL Steam client, so a game launched with Steam
+        // closed (common for directly-run SteamStub titles) has nothing to
+        // connect to and fails confusingly. Warn and abort the launch instead.
+        // We only get here before the exe entry point, so terminating now stops
+        // the game cleanly. RequireSteam=false opts out.
+        if (ReadIniBool("VersionProxy", "RequireSteam", true) && !SteamRunning())
+        {
+            MessageBoxA(nullptr,
+                "Steam isn't running.\n\n"
+                "Start Steam and sign in, then launch the game again.",
+                "UCOnline2", MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
+            TerminateProcess(GetCurrentProcess(), 0);
+            return FALSE;
+        }
+
+        // Arm the SteamStub bypass HERE -- synchronously, in DllMain, which runs
+        // before the exe entry point where the stub's ownership check fires. On
+        // a Unity game steam_api64 loads too late (lazy P/Invoke), and a wrapped
+        // exe that fails the check exits before steam_api64 ever loads. Signal
+        // steam_api64 (which also honours GetStubbedLol) so it doesn't hook
+        // GetTickCount a second time. Safe in DllMain: only the main thread
+        // exists this early, so MinHook's thread snapshot suspends nothing.
+        if (ReadIniBool("Settings", "GetStubbedLol", false) &&
+            UcoSteamStub::Install(&SteamStub_LogCb))
+            SetEnvironmentVariableA("UCO2_STEAMSTUB_HOOKED", "1");
+
         HANDLE t = CreateThread(nullptr, 0, LoaderThread, nullptr, 0, nullptr);
         if (t) CloseHandle(t);
     }
