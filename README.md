@@ -313,6 +313,24 @@ The proxy's overlay renderer is separate and still honours
 [`LoadOverlay`](#overlay), so a D3D12 title can use the proxy purely as an early
 loader with `LoadOverlay=no`.
 
+`[VersionProxy] SdrSafe` covers a second early-load hazard. With
+[SDR](#steam-datagram-relay-sdr), relay authorisation is keyed off the
+**process's** Steam AppId — but the overlay proxy otherwise preloads
+`steamclient` and the overlay as **spacewar (480)**, binding the process to
+`480` before UCO2's SDR path can claim `ogAppId`, so the relay refuses to route.
+
+```ini
+[VersionProxy]
+SdrSafe=true
+```
+
+`SdrSafe=true` makes the proxy stamp the **real** AppId (`ogAppId`) onto the
+process context while pointing the overlay at the spoofed id via
+`SteamOverlayGameId` — the same split UCO2's own `SetAppIDEnv` uses. The GUI
+patcher sets it automatically when SDR is enabled. (`LoadOverlay=no` sidesteps
+the early overlay load entirely, which is the usual choice for the D3D12 titles
+SDR tends to appear in.)
+
 ### SteamStub
 
 If `GetStubbedLol` is enabled, UCOnline2 patches SteamStub on the fly. This is
