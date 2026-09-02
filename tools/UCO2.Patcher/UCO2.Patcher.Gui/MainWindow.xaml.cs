@@ -56,7 +56,9 @@ public partial class MainWindow : Window
             FolderHintText.Text = "Scan complete";
             EngineValue.Text = scan.EngineLabel;
             ExecutableValue.Text = scan.ExecutablePath;
-            SteamApiValue.Text = scan.SteamApiPath;
+            SteamApiValue.Text = scan.SteamApiPaths.Count > 1
+                ? $"{scan.SteamApiPath}  (+{scan.SteamApiPaths.Count - 1} more — all replaced)"
+                : scan.SteamApiPath;
             ConfigValue.Text = scan.ConfigDirectory;
             ServicesValue.Text = scan.BackendLabel;
             SteamStubValue.Text = scan.SteamStub.ToString();
