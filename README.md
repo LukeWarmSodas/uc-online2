@@ -290,6 +290,29 @@ nothing else.
 Treat `WarnOverlayDisabled` as a hint, not a verdict: the overlay does work for
 directly-launched games, but a few titles never show it regardless.
 
+### Early loading (`LoadDLLsEarly`)
+
+Unity games P/Invoke `steam_api64.dll` lazily — it isn't loaded until the game
+makes its first Steam call. For a game that *also* uses EOS or PlayFab, that can
+happen **after** the game has already initialised its backend, so a plugin
+(`EOS_custom`, `playfab_universal`) installs its hooks too late to redirect it
+and online play silently fails to connect.
+
+The early proxy (`version.dll` / `XINPUT1_3.dll`) loads before graphics init, so
+it can pull `steam_api64` in ahead of time and arm those plugin hooks in advance:
+
+```ini
+[VersionProxy]
+LoadDLLsEarly=true
+```
+
+`patch.bat` and the GUI patcher set this automatically whenever a plugin is
+deployed, so you rarely write it by hand. It's a no-op when `steam_api64` is
+already loaded (e.g. games that import it statically), so it's safe to leave on.
+The proxy's overlay renderer is separate and still honours
+[`LoadOverlay`](#overlay), so a D3D12 title can use the proxy purely as an early
+loader with `LoadOverlay=no`.
+
 ### SteamStub
 
 If `GetStubbedLol` is enabled, UCOnline2 patches SteamStub on the fly. This is
