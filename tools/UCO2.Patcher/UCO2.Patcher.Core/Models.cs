@@ -58,6 +58,10 @@ public sealed class GameScanResult
     public required EngineKind Engine { get; init; }
     public required GameArchitecture Architecture { get; init; }
     public required string SteamApiPath { get; init; }
+    // Every steam_api64.dll copy in the game folder. Unity games sometimes ship
+    // one in the root AND one under Data/Plugins/x86_64; the engine loads the
+    // Data/Plugins copy, so we replace them ALL rather than guess which is live.
+    public IReadOnlyList<string> SteamApiPaths { get; init; } = [];
     public required string ExecutablePath { get; init; }
     public required string ConfigDirectory { get; init; }
     public string? UnityDataDirectory { get; init; }

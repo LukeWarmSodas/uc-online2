@@ -14,13 +14,25 @@ public sealed class PatchPlanner(ArtifactLocator artifacts)
         if (steamSource is null)
             throw new FileNotFoundException($"The {game.Architecture} UCOnline2 Steam API build was not found beside the patcher.");
 
-        operations.Add(new PatchOperation
+        // Replace EVERY steam_api64.dll copy in the game folder. A Unity game
+        // that ships one in the root and one under Data/Plugins/x86_64 loads the
+        // Data/Plugins copy, so patching only the primary leaves it on the real
+        // Steam DLL and UCOnline2 never gets called.
+        IReadOnlyList<string> apiTargets = game.SteamApiPaths.Count > 0
+            ? game.SteamApiPaths
+            : [game.SteamApiPath];
+        foreach (string target in apiTargets)
         {
-            Kind = PatchOperationKind.ReplaceFile,
-            SourcePath = steamSource,
-            TargetPath = game.SteamApiPath,
-            Description = $"Install {Path.GetFileName(game.SteamApiPath)}"
-        });
+            operations.Add(new PatchOperation
+            {
+                Kind = PatchOperationKind.ReplaceFile,
+                SourcePath = steamSource,
+                TargetPath = target,
+                Description = apiTargets.Count > 1
+                    ? $"Install {Path.GetFileName(target)} ({Path.GetFileName(Path.GetDirectoryName(target))})"
+                    : $"Install {Path.GetFileName(target)}"
+            });
+        }
 
         operations.Add(new PatchOperation
         {

@@ -90,12 +90,21 @@ public sealed class GameScanner
         if (competing.Length > 0)
             warnings.Add($"{competing.Length} competing loader file(s) will be backed up before removal when quarantine is enabled.");
 
+        // Replace EVERY steam_api64.dll copy, not just the primary: a Unity game
+        // that ships one in the root and one under Data/Plugins/x86_64 loads the
+        // latter, so patching only one leaves the game on the real Steam DLL.
+        string[] archApis = architecture == GameArchitecture.X86 ? x86Apis : x64Apis;
+        IReadOnlyList<string> steamApiPaths = archApis.Length > 0
+            ? archApis.Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+            : [steamApi];
+
         return new GameScanResult
         {
             GameDirectory = root,
             Engine = engine,
             Architecture = architecture,
             SteamApiPath = steamApi,
+            SteamApiPaths = steamApiPaths,
             ExecutablePath = executable,
             ConfigDirectory = configDirectory,
             UnityDataDirectory = unityData,

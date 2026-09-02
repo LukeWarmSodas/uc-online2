@@ -715,22 +715,37 @@ if defined KEYONLY goto :deploy_plugins
 if not defined EMU_DLL goto :deploy_plugins
 if not exist "%STEAM_DIR%" mkdir "%STEAM_DIR%" 2>nul
 
+rem Replace EVERY copy of the Steam API DLL in the game folder. A Unity game can
+rem ship one beside the exe AND one under Data\Plugins\x86_64; the engine loads
+rem the Data\Plugins copy, so patching only one leaves the game on the real DLL.
 rem Never overwrite an existing .bak -- on a second run that would replace the
 rem pristine original with our own DLL and lose it for good.
-if exist "%STEAM_DIR%steam_api64.dll" (
-  if exist "%STEAM_DIR%steam_api64.dll.bak" (
-    echo [SKIP] Backup already exists, leaving it alone.
+for %%F in ("%EMU_DLL%") do set "API_NAME=%%~nxF"
+set "API_FOUND="
+for /r "%GAME%" %%D in (%API_NAME%) do (
+  set "API_FOUND=1"
+  if exist "%%~fD.bak" (
+    echo [SKIP] Backup exists for "%%~fD" -- replacing DLL only.
   ) else (
-    copy /y "%STEAM_DIR%steam_api64.dll" "%STEAM_DIR%steam_api64.dll.bak" >nul
-    echo [OK] Backed up original to steam_api64.dll.bak
+    copy /y "%%~fD" "%%~fD.bak" >nul
+    echo [OK] Backed up "%%~fD"
+  )
+  copy /y "%EMU_DLL%" "%%~fD" >nul
+  if errorlevel 1 (
+    echo [ERROR] Failed to install "%%~fD" -- is the game running?
+  ) else (
+    echo [OK] Installed UCOnline2 -^> "%%~fD"
   )
 )
 
-copy /y "%EMU_DLL%" "%STEAM_DIR%steam_api64.dll" >nul
-if errorlevel 1 (
-  echo [ERROR] Failed to install steam_api64.dll -- is the game running?
-) else (
-  echo [OK] Installed UCOnline2 steam_api64.dll to %STEAM_DIR%
+if not defined API_FOUND (
+  rem Nothing to replace -- fresh install into the detected primary location.
+  copy /y "%EMU_DLL%" "%STEAM_DIR%%API_NAME%" >nul
+  if errorlevel 1 (
+    echo [ERROR] Failed to install %API_NAME% to %STEAM_DIR%
+  ) else (
+    echo [OK] Installed UCOnline2 %API_NAME% to %STEAM_DIR%
+  )
 )
 
 call :deploy_overlay_proxy
