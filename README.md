@@ -331,12 +331,29 @@ patcher sets it automatically when SDR is enabled. (`LoadOverlay=no` sidesteps
 the early overlay load entirely, which is the usual choice for the D3D12 titles
 SDR tends to appear in.)
 
+`[VersionProxy] RequireSteam` (**on by default**) makes the proxy check that the
+Steam client is running in its DllMain — before the game does anything — and, if
+it isn't, show a "Steam isn't running" warning and abort the launch. UCOnline2
+proxies the real Steam client, so a directly-launched game (common for SteamStub
+titles) with Steam closed otherwise fails in a confusing way. The check is
+conservative — only a definitive "Steam not running" aborts — and is a no-op for
+any game launched through Steam. Set `RequireSteam=false` to opt out.
+
 ### SteamStub
 
 If `GetStubbedLol` is enabled, UCOnline2 patches SteamStub on the fly. This is
 meant for games Steamless cannot unpack, such as Dave the Diver. It can also be
 used to avoid modifying the game files at all. If it's disabled, the function is
 ignored entirely and everything continues as though it were never implemented.
+
+The stub's ownership check runs at the **exe entry point**, before a Unity game
+lazily P/Invokes `steam_api64` — and a wrapped exe that fails the check exits
+before `steam_api64` ever loads. So the bypass is armed from the early proxy
+([`version.dll`](#early-loading-loaddllsearly)) in its DllMain, before the entry
+point, whenever `GetStubbedLol=true` and the proxy is deployed. `steam_api64`
+still arms it as a fallback for games that load it early, coordinating through an
+environment flag so GetTickCount is never hooked twice. The `cmp al, 30h` and
+`cmp bl, 30h` check signatures track the current upstream.
 
 I'm not responsible for the original code — it came from DenuvoSanctuary's Rust
 implementation, [found here](https://github.com/denuvosanctuary/steamstubbed). I
