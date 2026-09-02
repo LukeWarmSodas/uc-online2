@@ -29,6 +29,30 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Stamp DLL version resource from tag
+        shell: pwsh
+        run: |
+          # The DLL version resource (uc_online2.rc) reads its numbers from
+          # include/version.h. On a tagged release, regenerate that header from
+          # the tag so every built DLL carries the release version with no manual
+          # edit. Non-tag builds (branch pushes) keep the committed fallback.
+          $ref = "${{ github.ref_name }}"
+          if ($ref -match '^v(\d+)\.(\d+)\.(\d+)') {
+            $csv = "$($Matches[1]),$($Matches[2]),$($Matches[3]),0"
+            $str = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
+            $lines = @(
+              '#ifndef UCO2_VERSION_H',
+              '#define UCO2_VERSION_H',
+              "#define VER_FILEVERSION      $csv",
+              "#define VER_FILEVERSION_STR  ""$str""",
+              '#endif'
+            )
+            Set-Content -LiteralPath include/version.h -Value $lines -Encoding ASCII
+            Write-Host "Stamped DLL version resource -> $str"
+          } else {
+            Write-Host "Non-tag build ($ref); keeping committed include/version.h"
+          }
+
       - name: Build x86 version (steam_api.dll)
         run: msbuild uc_online2.vcxproj -p:Configuration=Release -p:Platform=Win32 -m
 
