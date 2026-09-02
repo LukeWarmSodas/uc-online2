@@ -1382,66 +1382,106 @@ void CDumpHandler::WriteDump(DWORD exceptionCode, _EXCEPTION_POINTERS* pExceptio
 #include "include/MinHook.h"
 #include <atomic>
 
-static std::atomic<uint32_t> g_SteamStubCount{ 0 };
-static constexpr uint32_t STEAM_STUB_MAX_COUNT = 1;
-static constexpr uint8_t STEAM_STUB_SIGNATURE[] = { 0x44, 0x0F, 0xB6, 0xF8, 0x3C, 0x30, 0x0F, 0x84 };
+// Ownership-check signatures. Each pattern ends at the stub's JZ rel32 (0F 84);
+// patchAt is the offset of the 0F within the match. We overwrite 0F 84 with
+// 90 E9 (nop + jmp rel32), reusing the JZ's own 4-byte operand so the branch
+// becomes an unconditional jump to the exact target it already had -- the pass
+// branch is now always taken. Add an entry here if a future SteamStub build
+// moves the check: grab the bytes just after its GetTickCount call site.
+struct SteamStubSig
+{
+	const uint8_t* bytes;
+	size_t         len;
+	size_t         patchAt;
+};
+
+// Variant 3.1 (x64): movzx r15d, al ; cmp al, 30h ; jz <ownership-ok>
+static constexpr uint8_t kSteamStubV31[] = { 0x44, 0x0F, 0xB6, 0xF8, 0x3C, 0x30, 0x0F, 0x84 };
+static constexpr SteamStubSig kSteamStubSigs[] = {
+	{ kSteamStubV31, sizeof(kSteamStubV31), 6 },
+};
 
 typedef DWORD(WINAPI* GetTickCount_t)(void);
-static GetTickCount_t g_OrigGetTickCount = nullptr;
+static GetTickCount_t     g_OrigGetTickCount = nullptr;
+static std::atomic<bool>  g_SteamStubArmed{ false };
 
-static uint8_t* SteamStub_FindSignature(uint8_t* start, uint8_t* end, const uint8_t* sig, size_t sigLen)
+// Scan [base, base+range) for the pattern under SEH: if the 128-byte window
+// runs past the end of a mapped page we swallow the fault instead of taking
+// down the host. No C++ objects with destructors in this frame, so __try is
+// legal here.
+static uint8_t* SteamStub_FindSigGuarded(uint8_t* base, size_t range, const SteamStubSig& sig)
 {
-	for (uint8_t* p = start; p < end - sigLen; ++p)
+	__try
 	{
-		bool match = true;
-		for (size_t i = 0; i < sigLen; ++i)
+		if (range < sig.len)
+			return nullptr;
+		uint8_t* end = base + range - sig.len;
+		for (uint8_t* p = base; p <= end; ++p)
 		{
-			if (p[i] != sig[i])
+			bool match = true;
+			for (size_t i = 0; i < sig.len; ++i)
 			{
-				match = false;
-				break;
+				if (p[i] != sig.bytes[i])
+				{
+					match = false;
+					break;
+				}
 			}
+			if (match)
+				return p;
 		}
-		if (match)
-			return p;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		return nullptr;
 	}
 	return nullptr;
 }
 
+// Flip only the two bytes we touch, then restore the original protection.
+static bool SteamStub_ApplyPatch(uint8_t* site, const SteamStubSig& sig)
+{
+	uint8_t* at = site + sig.patchAt;
+	DWORD oldProtect = 0;
+	if (!VirtualProtect(at, 2, PAGE_EXECUTE_READWRITE, &oldProtect))
+		return false;
+	at[0] = 0x90; // nop (was 0x0F)
+	at[1] = 0xE9; // jmp rel32, keeps the JZ's operand (was 0x84)
+	VirtualProtect(at, 2, oldProtect, &oldProtect);
+	FlushInstructionCache(GetCurrentProcess(), at, 2);
+	return true;
+}
+
+// We deliberately never MH_DisableHook from inside our own detour -- pulling a
+// hook while executing on its trampoline is unsafe. Once armed we leave the
+// hook in place as a plain pass-through; the atomic short-circuit makes that
+// free, and the CAS guarantees only the first thread to reach the check patches
+// even under a race.
 static DWORD WINAPI SteamStub_HookGetTickCount(void)
 {
-	uint8_t* returnAddr = reinterpret_cast<uint8_t*>(_ReturnAddress());
+	DWORD tick = g_OrigGetTickCount ? g_OrigGetTickCount() : 0;
 
-	uint8_t* start = returnAddr;
-	uint8_t* end = start + 128;
-
-	DWORD oldProtect = 0;
-	if (!VirtualProtect(start, static_cast<SIZE_T>(end - start), PAGE_EXECUTE_READWRITE, &oldProtect))
+	if (!g_SteamStubArmed.load(std::memory_order_acquire))
 	{
-		return g_OrigGetTickCount();
-	}
-
-	uint8_t* found = SteamStub_FindSignature(start, end, STEAM_STUB_SIGNATURE, sizeof(STEAM_STUB_SIGNATURE));
-	if (found)
-	{
-		// Turn the stub's conditional check-jump into an unconditional one:
-		// 0F 84 (je rel32) -> 90 E9 (nop; jmp rel32). The 4-byte rel32 is left
-		// intact and the instruction end is unchanged, so the jmp lands on the
-		// exact target the je would have -- the pass branch is now always taken.
-		// Synced to DenuvoSanctuary's current steam-stubbed (was je->jne here).
-		found[6] = 0x90; // nop (was 0x0F)
-		found[7] = 0xE9; // jmp (was 0x84)
-
-		uint32_t count = g_SteamStubCount.fetch_add(1, std::memory_order_seq_cst) + 1;
-		if (count >= STEAM_STUB_MAX_COUNT)
+		uint8_t* ret = reinterpret_cast<uint8_t*>(_ReturnAddress());
+		for (const auto& sig : kSteamStubSigs)
 		{
-			MH_DisableHook(reinterpret_cast<LPVOID*>(GetTickCount));
+			uint8_t* site = SteamStub_FindSigGuarded(ret, 128, sig);
+			if (!site)
+				continue;
+			bool expected = false;
+			if (g_SteamStubArmed.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+			{
+				if (SteamStub_ApplyPatch(site, sig))
+					UCOLOG("[UCOnline2] SteamStub armed: jz->jmp patched");
+				else
+					UCOLOG("[UCOnline2] SteamStub VirtualProtect failed");
+			}
+			break;
 		}
 	}
 
-	VirtualProtect(start, static_cast<SIZE_T>(end - start), oldProtect, &oldProtect);
-
-	return g_OrigGetTickCount();
+	return tick;
 }
 
 // ============================================================
