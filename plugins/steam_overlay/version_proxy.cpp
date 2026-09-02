@@ -152,6 +152,19 @@ static bool ReadIniBool(const char* section, const char* key, bool defVal)
            _stricmp(value, "on") == 0 || strcmp(value, "1") == 0;
 }
 
+// Read a string value from union-crax.ini next to the exe. Returns false (and
+// leaves out empty) when the key is missing.
+static bool ReadIniString(const char* section, const char* key, char* out, DWORD cch)
+{
+    out[0] = '\0';
+    char iniPath[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, iniPath, MAX_PATH);
+    char* slash = strrchr(iniPath, '\\');
+    if (!slash) return false;
+    strcpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - iniPath), "union-crax.ini");
+    return GetPrivateProfileStringA(section, key, "", out, cch, iniPath) > 0 && out[0];
+}
+
 // Locate the UCOnline2 steam_api64.dll to preload. Checks next to the exe
 // (Unreal / generic) first, then the Unity layout <root>\*_Data\Plugins\x86_64.
 static bool FindSteamApiDll(char* out, DWORD cch)
@@ -232,9 +245,28 @@ static DWORD WINAPI LoaderThread(void*)
     }
 
     char appId[32] = {};
-    ReadAppId(appId, sizeof(appId));
-    EnsureEnv("SteamAppId", appId);
-    EnsureEnv("SteamGameId", appId);
+    ReadAppId(appId, sizeof(appId));   // spoofed id (480) -- the overlay target
+
+    // [VersionProxy] SdrSafe -- for a game using Steam Datagram Relay, the
+    // process's Steam context must be the REAL AppId: relay authorisation is
+    // keyed off it, and preloading steamclient/overlay as spacewar here binds
+    // the process to 480 before UCO2's SDR path runs, so the relay refuses to
+    // route. Mirror UCO2's own split (SetAppIDEnv): put ogAppId on the context
+    // vars and steer the overlay at the spoofed id via SteamOverlayGameId.
+    char ogAppId[32] = {};
+    if (ReadIniBool("VersionProxy", "SdrSafe", false) &&
+        ReadIniString("Settings", "ogAppId", ogAppId, sizeof(ogAppId)))
+    {
+        SetEnvironmentVariableA("SteamAppId", ogAppId);
+        SetEnvironmentVariableA("SteamGameId", ogAppId);
+        EnsureEnv("SteamOverlayGameId", appId);
+        Log("[steam_overlay] SdrSafe: Steam context AppId=%s, overlay id=%s", ogAppId, appId);
+    }
+    else
+    {
+        EnsureEnv("SteamAppId", appId);
+        EnsureEnv("SteamGameId", appId);
+    }
     EnsureEnv("SteamClientLaunch", "1");
 
     char steam[MAX_PATH] = {};

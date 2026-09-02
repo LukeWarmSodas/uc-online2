@@ -33,15 +33,22 @@ public static partial class ConfigBuilder
         foreach ((uint appId, string name) in FindDlcEntries(game))
             output.AppendLine($"{appId}={SingleLine(name)}");
 
-        // When any plugin is deployed, have the early-load proxy (version.dll)
-        // preload steam_api64 before the game runs, so the plugin's hooks are in
-        // place before the game inits its backend. Unity P/Invokes steam_api64
-        // lazily, which can otherwise land after EOS/PlayFab is already up.
-        if (options.InstallPhoton || options.InstallEos || options.InstallCoherence || options.InstallPlayFab)
+        // Early-load proxy (version.dll) config.
+        //   LoadDLLsEarly: when any plugin is deployed, preload steam_api64
+        //     before the game runs so the plugin's hooks land before the game
+        //     inits its backend (Unity loads steam_api64 lazily).
+        //   SdrSafe: when SDR is on, keep the process Steam context on the real
+        //     AppId so the overlay's early spacewar load doesn't poison relay auth.
+        bool anyPlugin = options.InstallPhoton || options.InstallEos
+            || options.InstallCoherence || options.InstallPlayFab;
+        if (anyPlugin || options.EnableSdr)
         {
             output.AppendLine();
             output.AppendLine("[VersionProxy]");
-            output.AppendLine("LoadDLLsEarly=true");
+            if (anyPlugin)
+                output.AppendLine("LoadDLLsEarly=true");
+            if (options.EnableSdr)
+                output.AppendLine("SdrSafe=true");
         }
 
         if (options.InstallPhoton)
