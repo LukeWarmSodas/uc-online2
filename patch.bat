@@ -406,8 +406,10 @@ if defined STEAM_DIR echo   Steam API:   %STEAM_DIR%
 echo   Config:      %INI_DIR%
 if /i "%GET_STUBBED%"=="true" (
   echo   SteamStub:   detected ^(runtime hook enabled^)
+  echo                if the game still shows "Application load error", unpack the exe with Steamless: https://github.com/atom0s/Steamless
 ) else if "%STUB_RESULT%"=="2" (
   echo   SteamStub:   uncertain ^(unrecognized .bind layout^)
+  echo                GetStubbedLol cannot handle this variant - unpack the exe with Steamless: https://github.com/atom0s/Steamless
 ) else if "%STUB_RESULT%"=="3" (
   echo   SteamStub:   not checked ^(invalid or unreadable PE^)
 ) else (

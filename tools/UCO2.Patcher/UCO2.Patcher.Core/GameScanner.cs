@@ -83,8 +83,10 @@ public sealed class GameScanner
             warnings.Add("A ColdClientLoader/GBE configuration was found. Launch the game executable directly so it uses the real Steam client.");
         if (architecture == GameArchitecture.X86)
             warnings.Add("This is a 32-bit game. The x86 Steam API build will be installed and x64-only plugins will be skipped.");
+        if (stub == SteamStubStatus.Detected)
+            warnings.Add("SteamStub DRM detected. GetStubbedLol will try to unpack it at runtime; if the game still shows \"Application load error\", unpack the exe with Steamless (https://github.com/atom0s/Steamless) and re-scan.");
         if (stub == SteamStubStatus.UnrecognizedBindSection)
-            warnings.Add("The executable has an unfamiliar .bind section. SteamStub runtime patching will stay disabled.");
+            warnings.Add("SteamStub DRM detected with an unrecognized .bind variant, so runtime patching stays disabled. Unpack the exe with Steamless (https://github.com/atom0s/Steamless), then re-scan.");
         if (competing.Length > 0)
             warnings.Add($"{competing.Length} competing loader file(s) will be backed up before removal when quarantine is enabled.");
 
