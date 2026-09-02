@@ -189,6 +189,8 @@ S_API void S_CALLTYPE SteamAPI_ManualDispatch_FreeLastCallback(HSteamPipe hPipe)
 
 S_API bool S_CALLTYPE SteamAPI_ManualDispatch_GetAPICallResult(HSteamPipe hPipe, SteamAPICall_t hCall, void* pBuf, int cubBuf, int iExpected, bool* pbFailed)
 {
+	if (UcoInvEmu::IsOurCall(hCall))
+		return UcoInvEmu::GetAPICallResult(hCall, pBuf, cubBuf, iExpected, pbFailed);
 	if (g_DispatchMode == 3)
 		SteamAPI_ManualDispatch_Init();
 

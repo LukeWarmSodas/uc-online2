@@ -1457,6 +1457,8 @@ S_API void S_CALLTYPE SteamAPI_ISteamUtils_SetOverlayNotificationPosition(intptr
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamUtils_IsAPICallCompleted(intptr_t instancePtr, SteamAPICall_t hSteamAPICall, bool * pbFailed)
 {
+	if (UcoInvEmu::IsOurCall(hSteamAPICall))
+		return UcoInvEmu::IsAPICallCompleted(hSteamAPICall, pbFailed);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamGameServerUtils() || g_bClientReady == false)
@@ -1479,6 +1481,8 @@ S_API ESteamAPICallFailure S_CALLTYPE SteamAPI_ISteamUtils_GetAPICallFailureReas
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamUtils_GetAPICallResult(intptr_t instancePtr, SteamAPICall_t hSteamAPICall, void * pCallback, int cubCallback, int iCallbackExpected, bool * pbFailed)
 {
+	if (UcoInvEmu::IsOurCall(hSteamAPICall))
+		return UcoInvEmu::GetAPICallResult(hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamGameServerUtils() || g_bClientReady == false)
@@ -7282,6 +7286,8 @@ S_API void S_CALLTYPE SteamAPI_ISteamHTMLSurface_FileLoadDialogResponse(intptr_t
 }
 S_API EResult S_CALLTYPE SteamAPI_ISteamInventory_GetResultStatus(intptr_t instancePtr, SteamInventoryResult_t resultHandle)
 {
+	if (UcoInvEmu::Enabled() && UcoInvEmu::IsOurResult(resultHandle))
+		return UcoInvEmu::GetResultStatus(resultHandle);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7293,6 +7299,8 @@ S_API EResult S_CALLTYPE SteamAPI_ISteamInventory_GetResultStatus(intptr_t insta
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamInventory_GetResultItems(intptr_t instancePtr, SteamInventoryResult_t resultHandle, struct SteamItemDetails_t * pOutItemsArray, uint32 * punOutItemsArraySize)
 {
+	if (UcoInvEmu::Enabled() && UcoInvEmu::IsOurResult(resultHandle))
+		return UcoInvEmu::GetResultItems(resultHandle, pOutItemsArray, punOutItemsArraySize);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7304,6 +7312,8 @@ S_API bool S_CALLTYPE SteamAPI_ISteamInventory_GetResultItems(intptr_t instanceP
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamInventory_GetResultItemProperty(intptr_t instancePtr, SteamInventoryResult_t resultHandle, uint32 unItemIndex, const char * pchPropertyName, char * pchValueBuffer, uint32 * punValueBufferSizeOut)
 {
+	if (UcoInvEmu::Enabled() && UcoInvEmu::IsOurResult(resultHandle))
+		return UcoInvEmu::GetResultItemProperty(resultHandle, unItemIndex, pchPropertyName, pchValueBuffer, punValueBufferSizeOut);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7315,6 +7325,8 @@ S_API bool S_CALLTYPE SteamAPI_ISteamInventory_GetResultItemProperty(intptr_t in
 }
 S_API uint32 S_CALLTYPE SteamAPI_ISteamInventory_GetResultTimestamp(intptr_t instancePtr, SteamInventoryResult_t resultHandle)
 {
+	if (UcoInvEmu::Enabled() && UcoInvEmu::IsOurResult(resultHandle))
+		return UcoInvEmu::GetResultTimestamp(resultHandle);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7326,6 +7338,8 @@ S_API uint32 S_CALLTYPE SteamAPI_ISteamInventory_GetResultTimestamp(intptr_t ins
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamInventory_CheckResultSteamID(intptr_t instancePtr, SteamInventoryResult_t resultHandle, class CSteamID steamIDExpected)
 {
+	if (UcoInvEmu::Enabled() && UcoInvEmu::IsOurResult(resultHandle))
+		return UcoInvEmu::CheckResultSteamID(resultHandle, steamIDExpected);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7337,6 +7351,8 @@ S_API bool S_CALLTYPE SteamAPI_ISteamInventory_CheckResultSteamID(intptr_t insta
 }
 S_API void S_CALLTYPE SteamAPI_ISteamInventory_DestroyResult(intptr_t instancePtr, SteamInventoryResult_t resultHandle)
 {
+	if (UcoInvEmu::Enabled() && UcoInvEmu::IsOurResult(resultHandle))
+		{ UcoInvEmu::DestroyResult(resultHandle); return; }
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7348,6 +7364,8 @@ S_API void S_CALLTYPE SteamAPI_ISteamInventory_DestroyResult(intptr_t instancePt
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamInventory_GetAllItems(intptr_t instancePtr, SteamInventoryResult_t * pResultHandle)
 {
+	if (UcoInvEmu::Enabled())
+		return UcoInvEmu::GetAllItems(pResultHandle);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7392,6 +7410,8 @@ S_API bool S_CALLTYPE SteamAPI_ISteamInventory_DeserializeResult(intptr_t instan
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamInventory_GenerateItems(intptr_t instancePtr, SteamInventoryResult_t * pResultHandle, const SteamItemDef_t * pArrayItemDefs, const uint32 * punArrayQuantity, uint32 unArrayLength)
 {
+	if (UcoInvEmu::Enabled())
+		return UcoInvEmu::GrantItems(pArrayItemDefs, punArrayQuantity, unArrayLength, pResultHandle);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7403,6 +7423,8 @@ S_API bool S_CALLTYPE SteamAPI_ISteamInventory_GenerateItems(intptr_t instancePt
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamInventory_GrantPromoItems(intptr_t instancePtr, SteamInventoryResult_t * pResultHandle)
 {
+	if (UcoInvEmu::Enabled())
+		return UcoInvEmu::GrantItems(nullptr, nullptr, 0, pResultHandle);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7414,6 +7436,8 @@ S_API bool S_CALLTYPE SteamAPI_ISteamInventory_GrantPromoItems(intptr_t instance
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamInventory_AddPromoItem(intptr_t instancePtr, SteamInventoryResult_t * pResultHandle, SteamItemDef_t itemDef)
 {
+	if (UcoInvEmu::Enabled())
+		return UcoInvEmu::AddPromoItem(itemDef, pResultHandle);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7425,6 +7449,8 @@ S_API bool S_CALLTYPE SteamAPI_ISteamInventory_AddPromoItem(intptr_t instancePtr
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamInventory_AddPromoItems(intptr_t instancePtr, SteamInventoryResult_t * pResultHandle, const SteamItemDef_t * pArrayItemDefs, uint32 unArrayLength)
 {
+	if (UcoInvEmu::Enabled())
+		return UcoInvEmu::GrantItems(pArrayItemDefs, nullptr, unArrayLength, pResultHandle);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7436,6 +7462,8 @@ S_API bool S_CALLTYPE SteamAPI_ISteamInventory_AddPromoItems(intptr_t instancePt
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamInventory_ConsumeItem(intptr_t instancePtr, SteamInventoryResult_t * pResultHandle, SteamItemInstanceID_t itemConsume, uint32 unQuantity)
 {
+	if (UcoInvEmu::Enabled())
+		return UcoInvEmu::ConsumeItem(itemConsume, unQuantity, pResultHandle);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7480,6 +7508,8 @@ S_API void S_CALLTYPE SteamAPI_ISteamInventory_SendItemDropHeartbeat(intptr_t in
 }
 S_API bool S_CALLTYPE SteamAPI_ISteamInventory_TriggerItemDrop(intptr_t instancePtr, SteamInventoryResult_t * pResultHandle, SteamItemDef_t dropListDefinition)
 {
+	if (UcoInvEmu::Enabled())
+		return UcoInvEmu::GrantItems(&dropListDefinition, nullptr, 1, pResultHandle);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)
@@ -7557,6 +7587,8 @@ S_API bool S_CALLTYPE SteamAPI_ISteamInventory_GetEligiblePromoItemDefinitionIDs
 }
 S_API SteamAPICall_t S_CALLTYPE SteamAPI_ISteamInventory_StartPurchase(intptr_t instancePtr, const SteamItemDef_t * pArrayItemDefs, const uint32 * punArrayQuantity, uint32 unArrayLength)
 {
+	if (UcoInvEmu::Enabled())
+		return UcoInvEmu::StartPurchase(pArrayItemDefs, punArrayQuantity, unArrayLength);
 	if (g_bServerReady == true)
 	{
 		if (instancePtr == (intptr_t)g_ServerCtx.SteamInventory() || g_bClientReady == false)

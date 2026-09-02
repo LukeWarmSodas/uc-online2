@@ -29,6 +29,7 @@ S_API ISteamClient* g_pSteamClientGameServer = nullptr;
 
 void InstallEarlyAppIdHook(ISteamUtils* pUtils);
 
+#include "include/api/inventory_emu.h"
 #include "include/api/api_callbacks.h"
 #include "include/api/api_client.h"
 #include "include/api/api_interfaces.h"
@@ -569,6 +570,11 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 			SteamStub_Init();
 		}
 
+		// Local ISteamInventory emulation so in-game purchases/grants succeed
+		// and persist (real Steam has no items for the spoofed AppId).
+		if (s_PluginLoader.GetInventoryAutoGrant())
+			UcoInvEmu::Init(s_PluginLoader.GetIniPath(), s_PluginLoader.GetOgAppId());
+
 		// DLC ownership: [DLC] UnlockAll + named entries, plus the legacy
 		// [Settings] UnlockDLC list. Loaded before any game code can ask.
 		UcoDlcStore::Load(s_PluginLoader.GetIniPath(), s_PluginLoader.GetOgAppId());
@@ -767,7 +773,9 @@ void CCallbackDispatcher::ExecuteCallResult(HSteamPipe hPipe, SteamAPICall_t hCa
 	BYTE* pBuffer = new BYTE[pCb->GetCallbackSizeBytes()]();
 	bool bFailed = false;
 
-	bool bResult = m_pfnGetAPICallResult(hPipe, hCall, pBuffer, pCb->GetCallbackSizeBytes(), pCb->GetICallback(), &bFailed);
+	bool bResult = UcoInvEmu::IsOurCall(hCall)
+		? UcoInvEmu::GetAPICallResult(hCall, pBuffer, pCb->GetCallbackSizeBytes(), pCb->GetICallback(), &bFailed)
+		: m_pfnGetAPICallResult(hPipe, hCall, pBuffer, pCb->GetCallbackSizeBytes(), pCb->GetICallback(), &bFailed);
 
 	if (bResult && !bFailed)
 	{

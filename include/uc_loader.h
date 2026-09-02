@@ -201,6 +201,17 @@ uint32 GetOgAppId()
 		return IniReadBool("GetStubbedLol", false);
 	}
 
+	// [Settings] InventoryAutoGrant=1 -- emulate ISteamInventory locally so
+	// in-game purchases/grants succeed and persist (real Steam has no items for
+	// the spoofed AppId). Off by default; prices/definitions still pass through.
+	bool GetInventoryAutoGrant()
+	{
+		if (m_IniPath[0] == '\0')
+			return false;
+
+		return IniReadBool("InventoryAutoGrant", false);
+	}
+
 	// [Settings] VerboseLog=true re-enables the very chatty per-frame /
 	// per-callback log lines (RunCallbacks, ContextInit, GetHSteamPipe,
 	// callback dispatch traces). Off by default: those fire every frame and
