@@ -136,12 +136,95 @@ static bool GetSteamPath(char* out, DWORD cch)
     return false;
 }
 
+// Read a boolean flag from union-crax.ini next to the exe.
+static bool ReadIniBool(const char* section, const char* key, bool defVal)
+{
+    char iniPath[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, iniPath, MAX_PATH);
+    char* slash = strrchr(iniPath, '\\');
+    if (!slash) return defVal;
+    strcpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - iniPath), "union-crax.ini");
+
+    char value[16] = {};
+    GetPrivateProfileStringA(section, key, defVal ? "yes" : "no",
+        value, sizeof(value), iniPath);
+    return _stricmp(value, "yes") == 0 || _stricmp(value, "true") == 0 ||
+           _stricmp(value, "on") == 0 || strcmp(value, "1") == 0;
+}
+
+// Locate the UCOnline2 steam_api64.dll to preload. Checks next to the exe
+// (Unreal / generic) first, then the Unity layout <root>\*_Data\Plugins\x86_64.
+static bool FindSteamApiDll(char* out, DWORD cch)
+{
+    char root[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, root, MAX_PATH);
+    char* slash = strrchr(root, '\\');
+    if (!slash) return false;
+    *slash = '\0';   // root = game directory
+
+    _snprintf_s(out, cch, _TRUNCATE, "%s\\steam_api64.dll", root);
+    if (GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES) return true;
+
+    char pattern[MAX_PATH] = {};
+    _snprintf_s(pattern, MAX_PATH, _TRUNCATE, "%s\\*_Data", root);
+    WIN32_FIND_DATAA fd = {};
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            _snprintf_s(out, cch, _TRUNCATE,
+                "%s\\%s\\Plugins\\x86_64\\steam_api64.dll", root, fd.cFileName);
+            if (GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES) { FindClose(h); return true; }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    return false;
+}
+
 // Runs on its own thread so it isn't holding the loader lock. It still lands
 // well before graphics init: version.dll is loaded as a UnityPlayer import,
 // long before the exe's entry point, so this fires while the engine is still
 // starting up.
 static DWORD WINAPI LoaderThread(void*)
 {
+    // [VersionProxy] LoadDLLsEarly -- preload UCOnline2's steam_api64.dll here,
+    // BEFORE the game runs. Unity P/Invokes steam_api64 lazily on its first
+    // Steam call, which for an EOS/PlayFab game can land AFTER the game has
+    // already created its backend platform -- too late for a plugin (e.g.
+    // EOS_custom) to redirect it. version.dll loads before graphics init, so
+    // preloading steam_api64 here arms those plugin hooks in time.
+    if (ReadIniBool("VersionProxy", "LoadDLLsEarly", false))
+    {
+        if (GetModuleHandleA("steam_api64.dll"))
+        {
+            Log("[steam_overlay] LoadDLLsEarly: steam_api64.dll already loaded");
+        }
+        else
+        {
+            char dll[MAX_PATH] = {};
+            if (FindSteamApiDll(dll, sizeof(dll)))
+            {
+                HMODULE h = LoadLibraryExA(dll, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+                Log("[steam_overlay] LoadDLLsEarly: %s (%s)",
+                    h ? "loaded steam_api64.dll EARLY" : "FAILED to load steam_api64.dll", dll);
+            }
+            else
+            {
+                Log("[steam_overlay] LoadDLLsEarly: steam_api64.dll not found");
+            }
+        }
+    }
+
+    // The overlay renderer is separate from the preload above. Skip it when the
+    // overlay is disabled -- e.g. D3D12 titles where hooking the swapchain can
+    // destabilise renderer bring-up.
+    if (!ReadIniBool("Settings", "LoadOverlay", true))
+    {
+        Log("[steam_overlay] LoadOverlay disabled -- overlay not loaded");
+        return 0;
+    }
+
     if (g_Overlay || GetModuleHandleA("GameOverlayRenderer64.dll"))
     {
         Log("[steam_overlay] overlay already present -- nothing to do");
