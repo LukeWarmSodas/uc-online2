@@ -50,13 +50,16 @@ public sealed class PatchPlanner(ArtifactLocator artifacts)
             if (options.InstallPhoton) AddPlugin("photon_universal", game, operations);
             if (options.InstallEos)
             {
+                // KeepGameApp anon-logs into the game's OWN Epic app, so it needs
+                // no redirect credentials -- but it still needs the plugin present
+                // to do that login. Only the redirect path requires all five ids.
                 bool complete = !string.IsNullOrWhiteSpace(options.EosProductId)
                     && !string.IsNullOrWhiteSpace(options.EosSandboxId)
                     && !string.IsNullOrWhiteSpace(options.EosDeploymentId)
                     && !string.IsNullOrWhiteSpace(options.EosClientId)
                     && !string.IsNullOrWhiteSpace(options.EosClientSecret);
-                if (complete) AddPlugin("EOS_custom", game, operations);
-                else warnings.Add("EOS was selected but its credentials are incomplete, so EOS_custom will not be installed.");
+                if (options.EosKeepGameApp || complete) AddPlugin("EOS_custom", game, operations);
+                else warnings.Add("EOS was selected but its credentials are incomplete, so EOS_custom will not be installed. (Enable KeepGameApp to run on the game's own Epic app without them.)");
             }
             if (options.InstallPlayFab)
             {

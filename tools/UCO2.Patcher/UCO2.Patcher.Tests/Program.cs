@@ -27,6 +27,7 @@ internal static class Program
             TestBackendProfiles(root);
             TestBackendValidation(root);
             TestPlayFabPlanning(root);
+            TestEosPlanning(root);
             await TestSelfUpdateLayout(root);
             await TestBackupRestoreAndPackage(root);
             Console.WriteLine($"PASS: {passed} tests");
@@ -182,6 +183,49 @@ internal static class Program
         PatchPlan complete = planner.Create(FakeGame(gameRoot), options);
         True(complete.Operations.Any(operation => operation.Description.Contains("playfab_universal", StringComparison.Ordinal)), "Configured PlayFab plugin planned");
         True(!complete.Warnings.Any(warning => warning.Contains("TitleId", StringComparison.Ordinal)), "Configured PlayFab has no TitleId warning");
+        passed++;
+    }
+
+    private static void TestEosPlanning(string root)
+    {
+        string artifactRoot = Path.Combine(root, "EosArtifacts");
+        string gameRoot = Path.Combine(root, "EosGame");
+        Directory.CreateDirectory(Path.Combine(artifactRoot, "x64"));
+        Directory.CreateDirectory(Path.Combine(artifactRoot, "plugins"));
+        Directory.CreateDirectory(gameRoot);
+        File.WriteAllBytes(Path.Combine(artifactRoot, "x64", "steam_api64.dll"), [1]);
+        File.WriteAllBytes(Path.Combine(artifactRoot, "plugins", "EOS_custom.dll"), [2]);
+
+        var planner = new PatchPlanner(new ArtifactLocator(artifactRoot));
+
+        // EOS selected, no credentials, redirect mode -> warn and skip the plugin.
+        var bare = new PatchOptions { OriginalAppId = 123, InstallOverlayProxy = false, InstallEos = true };
+        PatchPlan incomplete = planner.Create(FakeGame(gameRoot), bare);
+        True(incomplete.Warnings.Any(warning => warning.Contains("credentials are incomplete", StringComparison.Ordinal)), "Incomplete EOS credentials warning");
+        True(!incomplete.Operations.Any(operation => operation.Description.Contains("EOS_custom", StringComparison.Ordinal)), "Incomplete EOS credentials skips plugin");
+
+        // KeepGameApp anon-logs into the game's own Epic app, so the plugin must be
+        // installed WITHOUT redirect credentials and without a warning. (regression
+        // guard: PatchPlanner used to require all five ids and skipped this path.)
+        var keep = new PatchOptions { OriginalAppId = 123, InstallOverlayProxy = false, InstallEos = true, EosKeepGameApp = true };
+        PatchPlan kept = planner.Create(FakeGame(gameRoot), keep);
+        True(kept.Operations.Any(operation => operation.Description.Contains("EOS_custom", StringComparison.Ordinal)), "KeepGameApp installs EOS_custom without credentials");
+        True(!kept.Warnings.Any(warning => warning.Contains("credentials are incomplete", StringComparison.Ordinal)), "KeepGameApp raises no credentials warning");
+
+        // Full redirect credentials -> plugin planned.
+        var full = new PatchOptions
+        {
+            OriginalAppId = 123,
+            InstallOverlayProxy = false,
+            InstallEos = true,
+            EosProductId = "p",
+            EosSandboxId = "s",
+            EosDeploymentId = "d",
+            EosClientId = "c",
+            EosClientSecret = "x"
+        };
+        PatchPlan complete = planner.Create(FakeGame(gameRoot), full);
+        True(complete.Operations.Any(operation => operation.Description.Contains("EOS_custom", StringComparison.Ordinal)), "Configured EOS redirect plugin planned");
         passed++;
     }
 
