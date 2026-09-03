@@ -46,7 +46,7 @@ rem    * finds the engine (Unity or Unreal) and the real executable
 rem    * finds where steam_api64.dll actually lives and installs ours THERE,
 rem      backing up the original first
 rem    * installs the early overlay proxy as version.dll for Unity or
-rem      XINPUT1_3.dll beside the real Unreal shipping executable
+rem      winmm.dll beside the real Unreal shipping executable
 rem    * detects Photon / EOS / PlayFab and copies the matching plugin
 rem    * writes a union-crax.ini with the right sections
 rem
@@ -86,8 +86,8 @@ if not defined EMU_DLL (
 
 rem ---- locate the early overlay proxy ----
 rem One binary is renamed at deployment time. UnityPlayer imports version.dll;
-rem UE shipping executables commonly import XINPUT1_3.dll. The proxy inspects
-rem its deployed filename and forwards to the matching real system DLL.
+rem UE shipping executables statically import winmm.dll (timeGetTime). The proxy
+rem inspects its deployed filename and forwards to the matching real system DLL.
 set "OVERLAY_PROXY="
 if exist "%SCRIPTDIR%plugins\steam_overlay\relbuild\x64\overlay_proxy.dll" set "OVERLAY_PROXY=%SCRIPTDIR%plugins\steam_overlay\relbuild\x64\overlay_proxy.dll"
 if not defined OVERLAY_PROXY if exist "%SCRIPTDIR%plugins\overlay_proxy.dll" set "OVERLAY_PROXY=%SCRIPTDIR%plugins\overlay_proxy.dll"
@@ -588,7 +588,7 @@ set "INI=%INI_DIR%\union-crax.ini"
 >> "%INI%" echo LogOverlay=no
 
 rem [VersionProxy] -- when we deploy any plugin, tell the early-load proxy
-rem (version.dll for Unity / XINPUT1_3.dll for Unreal) to preload steam_api64
+rem (version.dll for Unity / winmm.dll for Unreal) to preload steam_api64
 rem BEFORE the game runs, so the plugin's hooks install before the game inits
 rem its backend. Unity P/Invokes steam_api64 lazily on its first Steam call,
 rem which can otherwise land AFTER EOS/PlayFab is already up (too late to hook).
@@ -991,9 +991,14 @@ if /i "%ENGINE%"=="Unity" (
   set "OVERLAY_TARGET=%INI_DIR%\version.dll"
 )
 if /i "%ENGINE%"=="Unreal" (
-  set "OVERLAY_NAME=XINPUT1_3.dll"
-  for %%F in ("%GAME_EXE%") do set "OVERLAY_TARGET=%%~dpFXINPUT1_3.dll"
+  set "OVERLAY_NAME=winmm.dll"
+  for %%F in ("%GAME_EXE%") do set "OVERLAY_TARGET=%%~dpFwinmm.dll"
 )
+rem Older UCOnline2 deployed the Unreal early-loader as XINPUT1_3.dll, which UE5
+rem loads AFTER its D3D12 renderer -- too late to arm the SteamStub bypass. winmm
+rem is statically imported and loads before OEP. Retire any XINPUT1_3.dll our old
+rem installs left behind so we never run two proxies at once.
+if /i "%ENGINE%"=="Unreal" call :retire_stale_xinput
 if not defined OVERLAY_TARGET (
   echo [SKIP] No early overlay proxy rule for %ENGINE% games.
   goto :eof
@@ -1024,6 +1029,34 @@ if errorlevel 1 (
 ) else (
   echo [OK] Installed early overlay proxy as %OVERLAY_NAME%
   echo      %OVERLAY_TARGET%
+)
+goto :eof
+
+rem ------------------------------------------------------------
+rem  :retire_stale_xinput
+rem
+rem  A previous UCOnline2 deployed the Unreal early-loader as XINPUT1_3.dll. Now
+rem  that Unreal uses winmm.dll, remove that stale copy IF it is ours (byte-equal
+rem  to the current overlay proxy). If we had backed up the game's own
+rem  XINPUT1_3.dll, restore it; otherwise just delete ours. Never touch an
+rem  XINPUT1_3.dll that isn't ours.
+rem ------------------------------------------------------------
+:retire_stale_xinput
+if not defined GAME_EXE goto :eof
+if not defined OVERLAY_PROXY goto :eof
+for %%F in ("%GAME_EXE%") do set "STALE_XI=%%~dpFXINPUT1_3.dll"
+if not exist "%STALE_XI%" goto :eof
+fc /b "%OVERLAY_PROXY%" "%STALE_XI%" >nul 2>&1
+if errorlevel 1 goto :eof
+if exist "%STALE_XI%.uco2.bak" (
+  copy /y "%STALE_XI%.uco2.bak" "%STALE_XI%" >nul
+  if not errorlevel 1 (
+    del /q "%STALE_XI%.uco2.bak" >nul
+    echo [OK] Restored original XINPUT1_3.dll ^(superseded by winmm.dll^).
+  )
+) else (
+  del /q "%STALE_XI%" >nul
+  echo [OK] Removed stale UCOnline2 XINPUT1_3.dll ^(superseded by winmm.dll^).
 )
 goto :eof
 

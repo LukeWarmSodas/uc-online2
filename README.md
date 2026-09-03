@@ -33,7 +33,7 @@ It will:
 - find where `steam_api64.dll` actually lives and install ours **there**, backing
   up the original to `.bak` first
 - deploy the early Steam overlay proxy as `version.dll` for Unity or
-  `XINPUT1_3.dll` beside the real Unreal shipping executable
+  `winmm.dll` beside the real Unreal shipping executable
 - write `union-crax.ini` next to the **running exe** — for Unreal that is not the
   game folder, and an ini in the wrong place is silently ignored
 - detect **Photon**, **EOS**, **PlayFab** and **coherence**, copy the matching
@@ -272,7 +272,7 @@ AppId into the networking context, which fails for accounts that don't own the g
 
 UCOnline2 pulls Steam's `GameOverlayRenderer` into the process so a
 directly-launched game still gets the overlay. `patch.bat` additionally deploys an
-early proxy (`version.dll` / `XINPUT1_3.dll`) for engines that load
+early proxy (`version.dll` / `winmm.dll`) for engines that load
 `steam_api64.dll` too late for the overlay to hook the swapchain — see
 [`plugins/steam_overlay`](plugins/steam_overlay/README.md).
 
@@ -298,7 +298,7 @@ happen **after** the game has already initialised its backend, so a plugin
 (`EOS_custom`, `playfab_universal`) installs its hooks too late to redirect it
 and online play silently fails to connect.
 
-The early proxy (`version.dll` / `XINPUT1_3.dll`) loads before graphics init, so
+The early proxy (`version.dll` / `winmm.dll`) loads before graphics init, so
 it can pull `steam_api64` in ahead of time and arm those plugin hooks in advance:
 
 ```ini

@@ -1,11 +1,25 @@
 // ============================================================
-// steam_overlay -- force the Steam overlay to attach before graphics startup.
+// steam_overlay -- early-load system-DLL proxy: arms the SteamStub bypass and
+// (optionally) forces the Steam overlay to attach before graphics startup.
 //
 // THIS IS NOT A UCONLINE2 PLUGIN. It is a renameable system-DLL proxy that the
 // game loads at process start. patch.bat deploys it as version.dll for Unity or
-// XINPUT1_3.dll for Unreal. It sits next to the real game EXE, not in plugins\.
+// winmm.dll for Unreal. It sits next to the real game EXE, not in plugins\.
 //
-// WHY IT EXISTS
+// ONE BINARY, TWO IDENTITIES
+//   version.dll -- UnityPlayer.dll statically imports it. Passthrough is the
+//     GetFileVersionInfo*/VerQueryValue* functions below (resolved lazily from
+//     System32\version.dll on first call).
+//   winmm.dll   -- Unreal shipping executables statically import it (timeGetTime
+//     / timeBeginPeriod). Passthrough is 180 x64 jump thunks (winmm_thunks.asm)
+//     tail-jumping through g_winmm_ptrs[], filled from System32\winmm.dll by
+//     ResolveWinmm() in DllMain (winmm_resolve.cpp).
+// Both identities are statically imported, so this shim's DllMain runs BEFORE the
+// exe entry point -- early enough to arm the SteamStub bypass and preload plugin
+// hooks. (winmm superseded an earlier XINPUT1_3.dll identity, which UE5 loads too
+// late -- after the D3D12 renderer -- so the stub armed after its check had fired.)
+//
+// WHY THE OVERLAY NEEDS THIS
 // The Steam overlay (GameOverlayRenderer64.dll) has to install its DXGI/D3D
 // present hook BEFORE the engine creates its swapchain. UCOnline2 loads the
 // overlay from steam_api64's DllMain -- but many IL2CPP Unity games don't
@@ -15,19 +29,18 @@
 // so Shift+Tab does nothing (confirmed in Steam's own gameoverlay_renderer.txt:
 // XInput hooks only, and gameoverlayui64 never spawns).
 //
-// UnityPlayer.dll statically imports version.dll. Unreal shipping executables
-// commonly import XINPUT1_3.dll. Either identity loads this shim before graphics
-// initialization; all calls are then forwarded to the matching system DLL.
-//
 // Build (from plugins\steam_overlay): see steam_overlay.vcxproj ->
-// overlay_proxy.dll. The patcher renames it to version.dll for Unity or
-// XINPUT1_3.dll for Unreal games.
+// overlay_proxy.dll. The patcher renames it to version.dll or winmm.dll.
 // ============================================================
 #include <Windows.h>
-#include <Xinput.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include "steamstub_hook.h"   // shared SteamStub bypass (armed early from DllMain)
+
+// Runtime winmm passthrough (winmm_resolve.cpp) -- used only when this binary is
+// deployed AS winmm.dll. Fills the g_winmm_ptrs[] slots the winmm export thunks
+// (winmm_thunks.asm) jump through.
+extern "C" void ResolveWinmm(HMODULE self);
 
 static HMODULE g_Module        = nullptr;
 static HMODULE g_SystemProxy   = nullptr;
@@ -292,11 +305,12 @@ static DWORD WINAPI LoaderThread(void*)
     return 0;
 }
 
-// ---- system DLL passthrough ----
+// ---- version.dll passthrough ----
 //
-// Windows resolves the imported function names before DllMain, so the binary
-// exports the union of version.dll and XINPUT1_3.dll entry points. At call time
-// we load the real system DLL matching the filename the patcher gave us.
+// The binary's export table is the union of the version.dll and winmm.dll entry
+// points, so it satisfies whichever identity it was renamed to. version.dll's
+// functions forward lazily by name through here; winmm.dll's forward through the
+// asm thunks instead (see winmm_resolve.cpp), so they never reach InitProxy.
 static void InitProxy()
 {
     if (g_SystemProxy) return;
@@ -306,14 +320,15 @@ static void InitProxy()
     const char* filename = strrchr(modulePath, '\\');
     filename = filename ? filename + 1 : modulePath;
 
+    // Only the version.dll identity forwards through this lazy, by-name path.
+    // The winmm.dll identity forwards through the asm thunks + ResolveWinmm()
+    // instead, so its exports never reach Resolve<T>() -- nothing to do here.
     const char* systemName = nullptr;
     if (_stricmp(filename, "version.dll") == 0)
         systemName = "version.dll";
-    else if (_stricmp(filename, "xinput1_3.dll") == 0)
-        systemName = "xinput1_3.dll";
     else
     {
-        Log("[steam_overlay] unsupported proxy filename: %s", filename);
+        Log("[steam_overlay] Resolve<T> called under unexpected proxy filename: %s", filename);
         return;
     }
 
@@ -332,15 +347,6 @@ static T Resolve(const char* name)
 {
     InitProxy();
     return g_SystemProxy ? reinterpret_cast<T>(GetProcAddress(g_SystemProxy, name)) : nullptr;
-}
-
-template <typename T>
-static T ResolveOrdinal(WORD ordinal)
-{
-    InitProxy();
-    return g_SystemProxy
-        ? reinterpret_cast<T>(GetProcAddress(g_SystemProxy, MAKEINTRESOURCEA(ordinal)))
-        : nullptr;
 }
 
 extern "C" DWORD WINAPI Proxy_GetFileVersionInfoSizeA(LPCSTR file, LPDWORD handle)
@@ -366,36 +372,17 @@ extern "C" BOOL WINAPI Proxy_VerQueryValueA(const LPVOID block, LPCSTR sub, LPVO
 extern "C" BOOL WINAPI Proxy_VerQueryValueW(const LPVOID block, LPCWSTR sub, LPVOID* value, PUINT len)
 { using Fn = BOOL (WINAPI*)(const LPVOID,LPCWSTR,LPVOID*,PUINT); auto f=Resolve<Fn>("VerQueryValueW"); return f ? f(block,sub,value,len) : FALSE; }
 
-// ---- XINPUT1_3.dll passthrough ----
-extern "C" BOOL WINAPI Proxy_XInputDllMain(HINSTANCE, DWORD, LPVOID)
-{ return TRUE; }
-extern "C" void WINAPI Proxy_XInputEnable(BOOL enable)
-{ using Fn = void (WINAPI*)(BOOL); auto f=Resolve<Fn>("XInputEnable"); if (f) f(enable); }
-extern "C" DWORD WINAPI Proxy_XInputGetBatteryInformation(DWORD user, BYTE devType, XINPUT_BATTERY_INFORMATION* info)
-{ using Fn = DWORD (WINAPI*)(DWORD,BYTE,XINPUT_BATTERY_INFORMATION*); auto f=Resolve<Fn>("XInputGetBatteryInformation"); return f ? f(user,devType,info) : ERROR_DEVICE_NOT_CONNECTED; }
-extern "C" DWORD WINAPI Proxy_XInputGetCapabilities(DWORD user, DWORD flags, XINPUT_CAPABILITIES* caps)
-{ using Fn = DWORD (WINAPI*)(DWORD,DWORD,XINPUT_CAPABILITIES*); auto f=Resolve<Fn>("XInputGetCapabilities"); return f ? f(user,flags,caps) : ERROR_DEVICE_NOT_CONNECTED; }
-extern "C" DWORD WINAPI Proxy_XInputGetDSoundAudioDeviceGuids(DWORD user, GUID* render, GUID* capture)
-{ using Fn = DWORD (WINAPI*)(DWORD,GUID*,GUID*); auto f=Resolve<Fn>("XInputGetDSoundAudioDeviceGuids"); return f ? f(user,render,capture) : ERROR_DEVICE_NOT_CONNECTED; }
-extern "C" DWORD WINAPI Proxy_XInputGetKeystroke(DWORD user, DWORD reserved, PXINPUT_KEYSTROKE key)
-{ using Fn = DWORD (WINAPI*)(DWORD,DWORD,PXINPUT_KEYSTROKE); auto f=Resolve<Fn>("XInputGetKeystroke"); return f ? f(user,reserved,key) : ERROR_DEVICE_NOT_CONNECTED; }
-extern "C" DWORD WINAPI Proxy_XInputGetState(DWORD user, XINPUT_STATE* state)
-{ using Fn = DWORD (WINAPI*)(DWORD,XINPUT_STATE*); auto f=Resolve<Fn>("XInputGetState"); return f ? f(user,state) : ERROR_DEVICE_NOT_CONNECTED; }
-extern "C" DWORD WINAPI Proxy_XInputSetState(DWORD user, XINPUT_VIBRATION* vibration)
-{ using Fn = DWORD (WINAPI*)(DWORD,XINPUT_VIBRATION*); auto f=Resolve<Fn>("XInputSetState"); return f ? f(user,vibration) : ERROR_DEVICE_NOT_CONNECTED; }
-
-// Undocumented XInput 1.3 ordinal exports used by some games and controller
-// libraries. Keep their original ordinals in the module definition file.
-extern "C" DWORD WINAPI Proxy_XInputGetStateEx(DWORD user, XINPUT_STATE* state)
-{ using Fn = DWORD (WINAPI*)(DWORD,XINPUT_STATE*); auto f=ResolveOrdinal<Fn>(100); return f ? f(user,state) : ERROR_DEVICE_NOT_CONNECTED; }
-extern "C" DWORD WINAPI Proxy_XInputWaitForGuideButton(DWORD user, DWORD flags, void* eventInfo)
-{ using Fn = DWORD (WINAPI*)(DWORD,DWORD,void*); auto f=ResolveOrdinal<Fn>(101); return f ? f(user,flags,eventInfo) : ERROR_DEVICE_NOT_CONNECTED; }
-extern "C" DWORD WINAPI Proxy_XInputCancelGuideButtonWait(DWORD user)
-{ using Fn = DWORD (WINAPI*)(DWORD); auto f=ResolveOrdinal<Fn>(102); return f ? f(user) : ERROR_DEVICE_NOT_CONNECTED; }
-extern "C" DWORD WINAPI Proxy_XInputPowerOffController(DWORD user)
-{ using Fn = DWORD (WINAPI*)(DWORD); auto f=ResolveOrdinal<Fn>(103); return f ? f(user) : ERROR_DEVICE_NOT_CONNECTED; }
-
 static void SteamStub_LogCb(const char* m) { Log("[steam_overlay] %s", m); }
+
+// True when this binary was deployed under `name` (case-insensitive base name).
+static bool SelfNamed(const char* name)
+{
+    char path[MAX_PATH] = {};
+    GetModuleFileNameA(g_Module, path, MAX_PATH);
+    const char* base = strrchr(path, '\\');
+    base = base ? base + 1 : path;
+    return _stricmp(base, name) == 0;
+}
 
 // Is the Steam client running? ActiveProcess\pid holds the live Steam PID and
 // is cleared to 0 on a clean exit. Conservative: only a definitive pid==0 counts
@@ -434,6 +421,14 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
             TerminateProcess(GetCurrentProcess(), 0);
             return FALSE;
         }
+
+        // winmm.dll identity: fill the passthrough slots the export thunks
+        // (winmm_thunks.asm) tail-jump through, from the real System32\winmm.dll.
+        // Done here in DllMain -- which runs before the exe entry point -- so the
+        // slots are ready before the game makes its first winmm call. No-op when
+        // deployed as version.dll (Unity forwards through Resolve<T> instead).
+        if (SelfNamed("winmm.dll"))
+            ResolveWinmm(g_Module);
 
         // Arm the SteamStub bypass HERE -- synchronously, in DllMain, which runs
         // before the exe entry point where the stub's ownership check fires. On

@@ -116,10 +116,14 @@ public sealed class PatchPlanner(ArtifactLocator artifacts)
             return;
         }
 
+        // One binary, two identities. Unreal shipping exes statically import
+        // winmm.dll (timeGetTime), which loads before OEP -- early enough to arm
+        // the SteamStub bypass. (The old XINPUT1_3.dll identity loaded after UE5's
+        // D3D12 renderer, too late for the stub; patch.bat retires any left behind.)
         string? fileName = game.Engine switch
         {
             EngineKind.Unity => "version.dll",
-            EngineKind.Unreal => "XINPUT1_3.dll",
+            EngineKind.Unreal => "winmm.dll",
             _ => null
         };
         if (fileName is null)
