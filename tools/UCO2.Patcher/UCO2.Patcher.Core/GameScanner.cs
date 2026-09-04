@@ -195,7 +195,13 @@ public sealed class GameScanner
         else
         {
             if (BinaryInspector.ContainsAscii(executable, "OnlineSubsystemEOS")) result |= BackendKind.Eos;
-            if (BinaryInspector.ContainsAscii(executable, "OnlineSubsystemPlayFab")) result |= BackendKind.PlayFab;
+            // PlayFab in Unreal ships several ways: the OnlineSubsystemPlayFab OSS,
+            // or the community/marketplace UE SDK (class names PlayFabClientAPI /
+            // PlayFabSettings). UE monoliths compile it in, so there's no PlayFab*.dll
+            // to find -- match any of these markers in the shipping exe.
+            if (BinaryInspector.ContainsAscii(executable, "OnlineSubsystemPlayFab") ||
+                BinaryInspector.ContainsAscii(executable, "PlayFabClientAPI") ||
+                BinaryInspector.ContainsAscii(executable, "PlayFabSettings")) result |= BackendKind.PlayFab;
             if (BinaryInspector.ContainsAscii(executable, "PhotonUnityNetworking")) result |= BackendKind.PhotonRealtime;
         }
 
