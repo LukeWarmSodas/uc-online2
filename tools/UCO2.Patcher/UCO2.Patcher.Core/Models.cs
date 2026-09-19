@@ -132,6 +132,9 @@ public sealed class PatchOptions
     public string PhotonFusionAppId { get; set; } = "";
     public string PhotonVoiceAppId { get; set; } = "";
     public string PhotonNickname { get; set; } = "";
+    // [Realtime]/[Fusion] VerboseLog -- log every Photon response and status change.
+    // Failed connect/auth and dropped connections are logged regardless.
+    public bool PhotonVerboseLog { get; set; }
     public string EosProductId { get; set; } = "";
     public string EosSandboxId { get; set; } = "";
     public string EosDeploymentId { get; set; } = "";

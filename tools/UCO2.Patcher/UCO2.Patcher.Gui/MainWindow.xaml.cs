@@ -234,6 +234,7 @@ public partial class MainWindow : Window
         CoherenceKeyBox.Text = ini.Get("Coherence", "RuntimeKey");
         PhotonNicknameBox.Text = ini.Get("Realtime", "Nickname", ini.Get("Fusion", "Nickname"));
         EosVerboseCheck.IsChecked = ini.GetBool("EOS", "VerboseLog");
+        PhotonVerboseCheck.IsChecked = ini.GetBool("Realtime", "VerboseLog") || ini.GetBool("Fusion", "VerboseLog");
         PlayFabVerboseCheck.IsChecked = ini.GetBool("PlayFab", "VerboseLog");
         CoherenceProjectBox.Text = ini.Get("Coherence", "ProjectId");
         CoherenceLocalServerCheck.IsChecked = ini.GetBool("Coherence", "LaunchReplicationServer");
@@ -311,6 +312,7 @@ public partial class MainWindow : Window
             CoherenceProjectId = CoherenceProjectBox.Text,
             CoherenceLaunchReplicationServer = CoherenceLocalServerCheck.IsChecked == true,
             PhotonNickname = PhotonNicknameBox.Text,
+            PhotonVerboseLog = PhotonVerboseCheck.IsChecked == true,
             EosVerboseLog = EosVerboseCheck.IsChecked == true,
             LoadDllsEarly = LoadDllsEarlyCheck.IsChecked,
             SdrSafe = SdrSafeCheck.IsChecked,

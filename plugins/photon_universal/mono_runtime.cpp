@@ -402,6 +402,22 @@ MonoObject* MONO_DictByteGetItem(MonoObject* dict, uint8_t key)
     return result;
 }
 
+bool MONO_StringToUtf8(MonoObject* obj, char* out, size_t outSize)
+{
+    if (!out || outSize == 0) return false;
+    out[0] = 0;
+    if (!obj || !g_string_to_utf8 || !g_object_get_class || !g_class_get_name) return false;
+    // Type-check first: a wrong field offset must read as "no string", not crash.
+    MonoClass* k = g_object_get_class(obj);
+    const char* clsName = k ? g_class_get_name(k) : nullptr;
+    if (!clsName || strcmp(clsName, "String") != 0) return false;
+    char* utf8 = g_string_to_utf8((MonoString*)obj);
+    if (!utf8) return false;
+    _snprintf_s(out, outSize, _TRUNCATE, "%s", utf8);
+    if (g_free) g_free(utf8);
+    return true;
+}
+
 bool MONO_DescribeObject(MonoObject* obj, char* out, size_t outSize)
 {
     if (!out || outSize == 0) return false;

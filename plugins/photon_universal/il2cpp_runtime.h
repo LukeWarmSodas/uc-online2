@@ -132,6 +132,16 @@ Il2CppObject* IL2CPP_DictByteGetItem(Il2CppObject* dict, uint8_t key);
 // the type name + a short hex dump. Returns true on success.
 bool IL2CPP_DescribeObject(Il2CppObject* obj, char* out, size_t outSize);
 
+// Byte offset of instance field `fieldName` from the start of an object of
+// class `klass` (object header included). -1 if the runtime lacks the export
+// or the field doesn't exist.
+int IL2CPP_GetFieldOffset(Il2CppClass* klass, const char* fieldName);
+
+// If `obj` is a String, copy its plain UTF-8 text into `out` (NUL-terminated,
+// truncated). Returns false -- leaving `out` empty -- for null or non-string
+// objects. Unlike IL2CPP_DescribeObject it adds no decoration.
+bool IL2CPP_StringToUtf8(Il2CppObject* obj, char* out, size_t outSize);
+
 #ifdef __cplusplus
 }
 #endif

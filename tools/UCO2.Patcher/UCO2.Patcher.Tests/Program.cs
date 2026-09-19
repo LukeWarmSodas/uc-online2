@@ -30,6 +30,7 @@ internal static class Program
             TestEosPlanning(root);
             TestSettingsFlagsAndManualDlc(root);
             TestEosNoPresenceConfig(root);
+            TestPhotonVerboseConfig(root);
             TestAdvancedAndProxyConfig(root);
             await TestSelfUpdateLayout(root);
             await TestBackupRestoreAndPackage(root);
@@ -151,6 +152,33 @@ internal static class Program
         });
         True(merged.Contains("3000=Manual Name") && !merged.Contains("Scanned Name"), "manual DLC beats the scanner");
         True(merged.Contains("3001=Kept Name"), "scanner DLC kept when not overridden");
+        passed++;
+    }
+
+    // [Realtime] VerboseLog: written into the Photon section only when asked for.
+    private static void TestPhotonVerboseConfig(string root)
+    {
+        GameScanResult game = FakeGame(root);
+        static string PhotonSection(string cfg)
+        {
+            int start = cfg.IndexOf("[Realtime]", StringComparison.Ordinal);
+            if (start < 0) return "";
+            int next = cfg.IndexOf("\n[", start + 1, StringComparison.Ordinal);
+            return next < 0 ? cfg[start..] : cfg[start..next];
+        }
+
+        string on = ConfigBuilder.Build(game, new PatchOptions
+        {
+            OriginalAppId = 123, InstallOverlayProxy = false, InstallPhoton = true,
+            PhotonRealtimeAppId = "rt", PhotonVerboseLog = true,
+        });
+        True(PhotonSection(on).Contains("VerboseLog=1"), "Photon VerboseLog written under [Realtime]");
+
+        string off = ConfigBuilder.Build(game, new PatchOptions
+        {
+            OriginalAppId = 123, InstallOverlayProxy = false, InstallPhoton = true, PhotonRealtimeAppId = "rt",
+        });
+        True(PhotonSection(off).Length > 0 && !PhotonSection(off).Contains("VerboseLog"), "Photon VerboseLog absent by default");
         passed++;
     }
 

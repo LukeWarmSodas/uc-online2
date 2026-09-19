@@ -32,7 +32,7 @@ At init the plugin detects the Unity backend (Mono vs IL2CPP) by which runtime D
 Photon-backed games normally authenticate with a Steam ticket validated against the *developer's* publisher key — which you don't have. The fix has two parts:
 
 1. **Redirect the game to a Photon app you control** by rewriting the Photon AppId GUID on the wire at runtime (no asset patching needed — see below).
-2. **Point that Photon app at a permissive Custom Authentication URL** — use the shared **`https://photon.iforgor.cc`** (a hosted endpoint that always replies success; nothing to deploy), and force the wire-time auth type to `Custom`.
+2. **Point that Photon app at a permissive Custom Authentication URL** — use the shared **`https://photon.lukewarmsodas.workers.dev`** (a hosted endpoint that always replies success; nothing to deploy), and force the wire-time auth type to `Custom`.
 
 Both Photon's master/NameServer then accept the client without a real publisher key.
 
@@ -40,7 +40,7 @@ Both Photon's master/NameServer then accept the client without a real publisher 
 
 Setup is asset-patch-free — the plugin reads everything from `union-crax.ini` and rewrites AppIds on the wire at runtime, so you never modify the game's `resources.assets`.
 
-> **Shortcut:** **`UCO2.Patcher.exe`** (the release GUI) automates the DLL + ini steps — point it at a game folder and it detects whether the game uses Photon (Realtime/PUN or Fusion, Mono or IL2CPP, and whether it ships Voice), prompts for the real Steam AppId and your Photon GUID(s), writes `union-crax.ini` with the right section, and copies `photon_universal.dll` into `<game>\plugins\`. Non-Photon games are detected and skipped. (The repo-root `patch.bat` CLI does the same from source.) You still create the Photon app(s) and point their Custom Auth at `https://photon.iforgor.cc` (steps 1–2 below), and drop in UCOnline2's `steam_api64.dll` yourself.
+> **Shortcut:** **`UCO2.Patcher.exe`** (the release GUI) automates the DLL + ini steps — point it at a game folder and it detects whether the game uses Photon (Realtime/PUN or Fusion, Mono or IL2CPP, and whether it ships Voice), prompts for the real Steam AppId and your Photon GUID(s), writes `union-crax.ini` with the right section, and copies `photon_universal.dll` into `<game>\plugins\`. Non-Photon games are detected and skipped. (The repo-root `patch.bat` CLI does the same from source.) You still create the Photon app(s) and point their Custom Auth at `https://photon.lukewarmsodas.workers.dev` (steps 1–2 below), and drop in UCOnline2's `steam_api64.dll` yourself.
 
 ### 1. Create your Photon app(s)
 
@@ -57,17 +57,21 @@ On each Photon app you created (Realtime, Voice, Fusion — whichever apply):
 **Manage → Authentication → Add Provider → Custom**, set the URL to
 
 ```
-https://photon.iforgor.cc
+https://photon.lukewarmsodas.workers.dev
 ```
 
-leave the mandatory key/value pairs empty, and **uncheck "Reject Clients on Authentication Failure"**. Save.
+leave the mandatory key/value pairs empty, and **uncheck "Reject Clients on Authentication Failure"**. Save. Make sure it's the **only** Custom provider on the app — if an older URL is still listed, Photon may keep calling that one.
 
-That's it — **you don't need to host anything.** `photon.iforgor.cc` is a shared, permissive endpoint that approves every request and echoes the player's Steam name back as the `Nickname` (see "Player display name" below). It knows nothing about which Photon app points at it, so it works for anyone's app.
+That's it — **you don't need to host anything.** `photon.lukewarmsodas.workers.dev` is a shared, permissive endpoint that approves every request and echoes the player's Steam name back as the `Nickname` (see "Player display name" below). It knows nothing about which Photon app points at it, so it works for anyone's app.
+
+> **Set up before v1.20.17 with `https://photon.iforgor.cc`?** Change it to the URL above. That host sits behind Cloudflare Bot Fight Mode, which challenges Photon's server-to-server auth calls, so **every** login through it failed — in-game it looks like the connection hangs or times out, and the log shows `CustomAuthenticationFailed ... (403) Forbidden` (see step 5).
 
 <details>
 <summary>Prefer to self-host the auth endpoint?</summary>
 
-Deploy this to <https://workers.cloudflare.com>, then use your own `https://….workers.dev` URL in place of `photon.iforgor.cc`:
+Deploy this to <https://workers.cloudflare.com>, then use your own `https://….workers.dev` URL in place of `photon.lukewarmsodas.workers.dev`.
+
+**Keep it on `workers.dev`** — don't route it through a custom domain on a zone with Cloudflare bot protection. Photon calls the URL from Azure datacenter IPs with an empty User-Agent, which is exactly what **Bot Fight Mode** challenges, and a challenge reaches Photon as a `403`. On the Free plan Bot Fight Mode can't be skipped per hostname, so a custom domain means turning it off for the whole zone.
 
 ```js
 export default {
@@ -124,6 +128,7 @@ ForcedAuthType=0
 - `PhotonAppIdVoice` — optional. The plugin classifies peer instances at runtime (first peer = Realtime, second distinct peer = Voice) and routes the Voice peer's `params[224]` to this GUID. Required for any PUN game that ships `PhotonVoice` (like R.E.P.O.).
 - `PhotonAppIdFusion` — your Fusion app's GUID.
 - `ForcedAuthType=0` — `Custom` (matches the Custom Auth provider). Use `255` for `None` if you want pure anonymous instead.
+- `VerboseLog=1` — optional. Log **every** Photon operation response and connection-state change, not just the failures. Failed connects/logins and dropped connections are logged either way (see step 5). The patcher's **Verbose Photon logging** toggle sets it.
 
 The `[Realtime]` section is also accepted under the legacy name `[PUN]`, so inis written by older tooling keep working.
 
@@ -151,7 +156,27 @@ The lines that prove each module fired:
 - `[Realtime] OpAuthenticate hook @ …` / `[Realtime/Mono] module active` — Realtime/PUN hooks in place.
 - `[Realtime] SendOp op=220 (Realtime peer): params[224] AppId -> …` — wire-time AppId rewrite fired (critical: PUN's `OpGetRegions` op 220 sends an *empty* ApplicationId that Photon would otherwise reject).
 - `[Fusion] OpAuthenticate: authType X -> 0` — Fusion auth-type override fired.
+- `[Realtime/Mono] response logging: OnOperationResponse=hooked OnStatusChanged=hooked` — the plugin can see what Photon sends **back** (below).
+
 Photon dashboard CCU going 0 → 1 confirms the connection reached your app.
+
+#### When it doesn't connect
+
+The plugin logs Photon's own answer whenever a connect, login or join fails, or the connection drops — no flag needed. The line to look for:
+
+```
+response (Realtime peer, NameServer): op=230 Authenticate FAILED -> ReturnCode 32755 CustomAuthenticationFailed: "The remote server returned an error: (403) Forbidden."
+```
+
+| What the log says | What it means |
+|---|---|
+| `CustomAuthenticationFailed` … `(403) Forbidden` | Photon called your app's Custom Auth URL and was **refused**. The app points at an old/dead worker, or the URL sits behind Cloudflare bot protection (see step 2). Re-point it at `https://photon.lukewarmsodas.workers.dev`. |
+| `CustomAuthenticationFailed` with another HTTP error | Same idea — the Custom Auth URL answered with an error. Open it in a browser; it should show `{"ResultCode":1,...}`. |
+| `InvalidAuthentication` | The AppId was rejected — usually a Realtime GUID in the Voice slot or vice versa (see "Why two Photon apps" below). |
+| `MaxCcuReached` | Your Photon app is at its free-tier CCU limit. |
+| `status … TimeoutDisconnect` / `DisconnectByServer…` | The connection itself dropped — network or firewall, not configuration. |
+
+With `[Realtime] VerboseLog=1` you also get every successful step (`GetRegions -> Ok`, `Authenticate -> Ok`, …), which shows how far a connection got.
 
 ## Why two Photon apps for PUN+Voice games?
 

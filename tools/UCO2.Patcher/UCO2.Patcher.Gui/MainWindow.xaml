@@ -217,6 +217,8 @@
                                                 <TextBlock Grid.Row="2" Text="Voice AppId" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="PhotonVoiceBox" Grid.Row="2" Grid.Column="1" Margin="0,3" TextChanged="BackendField_Changed" />
                                                 <TextBlock Grid.Row="3" Text="Nickname" VerticalAlignment="Center" Margin="0,4" /><TextBox x:Name="PhotonNicknameBox" Grid.Row="3" Grid.Column="1" Margin="0,3" ToolTip="Optional display name (Photon Nickname)" />
                                             </Grid>
+                                            <ToggleButton x:Name="PhotonVerboseCheck" Style="{StaticResource OptionToggle}" Margin="0,10,0,0"
+                                                          Content="Verbose Photon logging" ToolTip="[Realtime] VerboseLog — log every Photon response and status change. Failed logins and dropped connections are logged even without it." />
                                         </StackPanel>
                                     </Border>
 

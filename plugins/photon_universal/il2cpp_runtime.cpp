@@ -27,6 +27,8 @@ typedef void                 (*Fn_il2cpp_free)(void*);
 typedef const MethodInfo*    (*Fn_il2cpp_class_get_methods)(Il2CppClass*, void**);
 typedef const char*          (*Fn_il2cpp_method_get_name)(const MethodInfo*);
 typedef uint32_t             (*Fn_il2cpp_method_get_param_count)(const MethodInfo*);
+typedef void*                (*Fn_il2cpp_class_get_field_from_name)(Il2CppClass*, const char*);
+typedef size_t               (*Fn_il2cpp_field_get_offset)(void*);
 
 static HMODULE g_hGameAssembly = nullptr;
 static bool    g_bReady        = false;
@@ -49,6 +51,8 @@ static Fn_il2cpp_free                        g_free                        = nul
 static Fn_il2cpp_class_get_methods           g_class_get_methods           = nullptr;
 static Fn_il2cpp_method_get_name             g_method_get_name             = nullptr;
 static Fn_il2cpp_method_get_param_count      g_method_get_param_count      = nullptr;
+static Fn_il2cpp_class_get_field_from_name   g_class_get_field_from_name   = nullptr;
+static Fn_il2cpp_field_get_offset            g_field_get_offset            = nullptr;
 static Il2CppClass*                          g_byteClass                   = nullptr;
 
 #define RESOLVE(name) \
@@ -99,6 +103,10 @@ bool IL2CPP_TryInit(void)
         GetProcAddress(g_hGameAssembly, "il2cpp_method_get_name");
     g_method_get_param_count = (Fn_il2cpp_method_get_param_count)
         GetProcAddress(g_hGameAssembly, "il2cpp_method_get_param_count");
+    g_class_get_field_from_name = (Fn_il2cpp_class_get_field_from_name)
+        GetProcAddress(g_hGameAssembly, "il2cpp_class_get_field_from_name");
+    g_field_get_offset       = (Fn_il2cpp_field_get_offset)
+        GetProcAddress(g_hGameAssembly, "il2cpp_field_get_offset");
 
     // Attach the current native thread to the IL2CPP domain so we
     // can call into managed code safely. Required before any
@@ -397,6 +405,31 @@ Il2CppObject* IL2CPP_DictByteGetItem(Il2CppObject* dict, uint8_t key)
     Il2CppObject* result = g_runtime_invoke(getItem, dict, args, &exc);
     if (exc) return nullptr;
     return result;
+}
+
+int IL2CPP_GetFieldOffset(Il2CppClass* klass, const char* fieldName)
+{
+    if (!g_bReady || !klass || !fieldName) return -1;
+    if (!g_class_get_field_from_name || !g_field_get_offset) return -1;
+    void* field = g_class_get_field_from_name(klass, fieldName);
+    if (!field) return -1;
+    return (int)g_field_get_offset(field);
+}
+
+bool IL2CPP_StringToUtf8(Il2CppObject* obj, char* out, size_t outSize)
+{
+    if (!out || outSize == 0) return false;
+    out[0] = 0;
+    if (!obj || !g_string_to_utf8 || !g_object_get_class || !g_class_get_name) return false;
+    // Type-check first: a wrong field offset must read as "no string", not crash.
+    Il2CppClass* k = g_object_get_class(obj);
+    const char* clsName = k ? g_class_get_name(k) : nullptr;
+    if (!clsName || strcmp(clsName, "String") != 0) return false;
+    char* utf8 = g_string_to_utf8(obj);
+    if (!utf8) return false;
+    _snprintf_s(out, outSize, _TRUNCATE, "%s", utf8);
+    if (g_free) g_free(utf8);
+    return true;
 }
 
 bool IL2CPP_DescribeObject(Il2CppObject* obj, char* out, size_t outSize)

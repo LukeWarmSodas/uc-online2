@@ -79,6 +79,8 @@ public static partial class ConfigBuilder
             if (!string.IsNullOrWhiteSpace(options.PhotonNickname))
                 output.AppendLine($"Nickname={SingleLine(options.PhotonNickname)}");
             output.AppendLine("ForcedAuthType=0");
+            if (options.PhotonVerboseLog)
+                output.AppendLine("VerboseLog=1");
         }
 
         if (options.InstallEos)
